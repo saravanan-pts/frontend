@@ -6,6 +6,7 @@ stages:
   - build
   - deploy
 
+
 # Build using Azure Container Registry Tasks (builds in Azure, no disk space issues!)
 # ACR Tasks build images directly in Azure infrastructure, bypassing GitLab runner limitations
 build_to_acr:
