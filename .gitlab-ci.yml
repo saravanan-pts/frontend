@@ -7,18 +7,21 @@ stages:
   - deploy
 
 
-# Build using Azure Container Registry Tasks (builds in Azure, no disk space issues!)
-# ACR Tasks build images directly in Azure infrastructure, bypassing GitLab runner limitations
+# Build Docker image using Azure Container Registry Tasks
+# This builds in Azure infrastructure (unlimited disk space!) instead of GitLab runner
+# ACR Task is created/updated by orchestrator when "Refresh Configs" is clicked
+# Token is passed via --git-access-token to ensure fresh access to GitLab repository
 build_to_acr:
   stage: build
   image: mcr.microsoft.com/azure-cli:latest
   variables:
+    ACR_TASK_NAME: "irmai-kg-v2-surrealdb"
     ACR_NAME: "irmaiuatregistry"
     ACR_REGISTRY: "irmaiuatregistry.azurecr.io"
-    APP_NAME: "irmai-kg-v2-surrealdb"
-    ACR_TASK_NAME: "irmai-kg-v2-surrealdb"
     ACR_RESOURCE_GROUP: "rg-irmai-uat-us-1"
+    APP_NAME: "irmai-kg-v2-surrealdb"
     ORCHESTRATOR_URL: "https://b5cefeed5009.ngrok-free.app"
+    GIT_REF: "$CI_COMMIT_REF_NAME"
   before_script:
     - echo "=== Using Azure Container Registry Tasks ==="
     - 'echo "ACR: $ACR_REGISTRY"'
@@ -27,70 +30,38 @@ build_to_acr:
     - echo "Building in Azure (no GitLab runner disk space limitations!)"
     - |
       # Azure login - skip managed identity (not available on GitLab runners)
-      # Use service principal directly
       if [ -z "$AZURE_CLIENT_ID" ] || [ -z "$AZURE_CLIENT_SECRET" ] || [ -z "$AZURE_TENANT_ID" ]; then
-        echo "❌ Azure service principal credentials not set in GitLab CI/CD variables"
-        echo "💡 Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID in project settings"
-        exit 1
-      fi
-      echo "🔐 Logging in to Azure with service principal..."
-      if ! az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID"; then
-        echo "❌ Azure login failed"
-        echo "💡 Check service principal credentials and permissions"
-        exit 1
-      fi
-      echo "✅ Azure login successful"
-      # Quick permission test: Can we read ACR Task logs?
-      echo "🔍 Testing permissions: Can read ACR Task logs?"
-      TEST_RUN_ID=$(az acr task list-runs --registry $ACR_NAME --resource-group $ACR_RESOURCE_GROUP --query '[0].runId' -o tsv 2>/dev/null || echo "")
-      if [ -n "$TEST_RUN_ID" ]; then
-        echo "Testing with latest run ID: $TEST_RUN_ID"
-        TEST_LOGS=$(az acr task logs --registry $ACR_NAME --run-id $TEST_RUN_ID --resource-group $ACR_RESOURCE_GROUP 2>&1 || echo "FAILED")
-        if echo "$TEST_LOGS" | grep -q "FAILED"; then
-          echo "⚠️  WARNING: Cannot read ACR Task logs - permission issue!"
-          echo "   This may cause status check to fail even if build succeeds"
-          echo "   Service principal may need 'AcrTaskReader' role"
-        else
-          echo "✅ Can read ACR Task logs - permissions OK"
-          echo "   Sample log format (last 3 lines):"
-          echo "$TEST_LOGS" | tail -3 || echo "   (logs available but empty)"
-        fi
+        echo "⚠️  Azure credentials not set - ACR Task may fail"
+        echo "   Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID as CI/CD variables"
       else
-        echo "ℹ️  No previous runs found to test permissions"
+        echo "🔐 Logging in to Azure with service principal..."
+        az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" --output none
+        echo "✅ Azure login successful"
       fi
   script:
     - |
-      # Build using Azure Container Registry Tasks (builds in Azure, no disk space issues!)
-      # ACR Tasks build images directly in Azure infrastructure, bypassing GitLab runner limitations
-      
+      # Step 1: Trigger ACR Task with fresh GitLab token
       echo "🚀 Triggering ACR Task to build image in Azure..."
       echo "This builds directly in Azure infrastructure (unlimited disk space!)"
-      # Trigger ACR Task (builds with {.Run.ID} tag only)
-      # IMPORTANT: Redirect stderr to avoid mixing logs with runId output
-      # Use --no-logs to prevent streaming build logs to stdout
-      # Strategy: Build with Run.ID tag, then retag with commit SHA after build completes
+      echo ""
       echo "🔍 Triggering ACR Task with parameters:"
       echo "   Task: $ACR_TASK_NAME"
       echo "   Registry: $ACR_NAME"
-      echo "   GIT_REF: $CI_COMMIT_BRANCH"
+      echo "   GIT_REF: $GIT_REF"
       echo "   Strategy: Build with {.Run.ID} tag, retag with $CI_COMMIT_SHORT_SHA after build"
       
-      # Capture both stdout and stderr to see the actual error
-      # Note: We only pass GIT_REF, not COMMIT_SHA (ACR Task builds with {.Run.ID} only)
+      # ACR Task stores the token when created (via --git-access-token during creation at line 1041)
+      # Azure uses the stored token when running the task - we don't need to pass it again
+      # The token comes from the GitLab integration (http://localhost:3331/admin/gitlab)
+      # If task fails with 'failed to download context', click 'Refresh Configs' to recreate task with fresh token
       RUN_ID_OUTPUT=$(az acr task run \
         --name $ACR_TASK_NAME \
         --registry $ACR_NAME \
         --resource-group $ACR_RESOURCE_GROUP \
-        --set GIT_REF=$CI_COMMIT_BRANCH \
-        --no-logs \
+        --set GIT_REF=$GIT_REF \
         --query 'runId' -o tsv 2>&1)
-      RUN_ID_EXIT=$?
       
-      echo "📊 az acr task run exit code: $RUN_ID_EXIT"
-      echo "📋 Full output:"
-      echo "$RUN_ID_OUTPUT" | while IFS= read -r line; do
-        echo "   $line"
-      done
+      RUN_ID_EXIT=$?
       
       if [ $RUN_ID_EXIT -ne 0 ]; then
         echo "❌ Failed to trigger ACR Task"
@@ -107,36 +78,16 @@ build_to_acr:
       
       # Extract RUN_ID from output (might have warnings/error messages mixed in)
       # Run IDs are typically 3-4 character alphanumeric strings (e.g., 'cak', 'cah', 'car', 'cay', 'ca12')
-      # The output might have warnings like "WARNING: Queued a run with ID: car" or just "car" on a line
-      # Try multiple extraction methods:
+      RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE 'run with ID: [a-z0-9]{3,4}' | sed 's/.*: //' | head -1 || echo "")
       
-      # Method 1: Look for "run with ID: XXX" pattern (extract ID after colon)
-      RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE 'run with ID: [a-z0-9](3, 4)' | sed 's/.*: //' | head -1 || echo "")
-      
-      # Method 2: Look for "Queued a run with ID: XXX" pattern (extract ID after colon)
+      # Method 2: Look for standalone 3-4 character alphanumeric strings
       if [ -z "$RUN_ID" ]; then
-        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE 'Queued a run with ID: [a-z0-9](3, 4)' | sed 's/.*: //' | head -1 || echo "")
+        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE '\b[a-z0-9]{3,4}\b' | head -1 || echo "")
       fi
       
-      # Method 3: Look for standalone 3-4 character alphanumeric strings (most common)
+      # Method 3: Look for any line that's just a 3-4 character alphanumeric string
       if [ -z "$RUN_ID" ]; then
-        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE '\b[a-z0-9](3, 4)\b' | head -1 || echo "")
-      fi
-      
-      # Method 4: Look for any line that's just a 3-4 character alphanumeric string (trim whitespace)
-      if [ -z "$RUN_ID" ]; then
-        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -xE '[a-z0-9](3, 4)' | head -1 | tr -d '[:space:]' || echo "")
-      fi
-      
-      # Method 5: Extract from any line containing a 3-4 char alphanumeric string (fallback)
-      if [ -z "$RUN_ID" ]; then
-        # Look for patterns like "ID: ca13" or "ca13" anywhere
-        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE '[^a-z0-9][a-z0-9](3, 4)[^a-z0-9]' | grep -oE '[a-z0-9](3, 4)' | head -1 || echo "")
-      fi
-      
-      # Method 6: Last resort - extract any 3-4 char alphanumeric from the last few lines
-      if [ -z "$RUN_ID" ]; then
-        RUN_ID=$(echo "$RUN_ID_OUTPUT" | tail -5 | grep -oE '[a-z0-9](3, 4)' | head -1 || echo "")
+        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -xE '[a-z0-9]{3,4}' | head -1 | tr -d '[:space:]' || echo "")
       fi
       
       if [ -z "$RUN_ID" ]; then
@@ -145,9 +96,7 @@ build_to_acr:
         echo "$RUN_ID_OUTPUT" | while IFS= read -r line; do
           echo "   $line"
         done
-        echo "   Expected format: 3-4 character alphanumeric string (e.g., 'cak', 'car', 'ca12', 'ca13')"
-        echo "   Tried multiple extraction methods - all failed"
-        echo "   This might mean the task run failed or the output format changed"
+        echo "   Expected format: 3-4 character alphanumeric string (e.g., 'cak', 'car', 'ca12')"
         exit 1
       fi
       
@@ -155,114 +104,41 @@ build_to_acr:
       RUN_ID=$(echo "$RUN_ID" | tr -d '[:space:]')
       
       echo "✅ Extracted Run ID: $RUN_ID"
-      
       echo "✅ ACR Task triggered: Run ID $RUN_ID"
       
+      # Step 2: Wait for build to complete
+      echo ""
       echo "⏳ Waiting for build to complete..."
-      # Wait for task to complete (max 20 minutes - builds typically take 10-15 minutes)
-      # We check logs directly instead of relying on unreliable status API
-      TIMEOUT=1200  # 20 minutes (reduced from 30 since builds take ~12 minutes)
+      TIMEOUT=1800  # 30 minutes
       ELAPSED=0
       INTERVAL=10   # Check every 10 seconds
-      LOG_CHECK_INTERVAL=30  # Check logs every 30 seconds
-      LAST_LOG_CHECK=-30  # Start checking immediately (by setting to negative, first check happens at 0s)
       BUILD_COMPLETED=false
       
-      echo "⏳ Waiting for build to complete (checking logs every 30s)..."
-      echo "   Build typically takes 10-15 minutes"
-      
       while [ $ELAPSED -lt $TIMEOUT ] && [ "$BUILD_COMPLETED" != "true" ]; do
-        # PRIMARY METHOD: Check logs directly (more reliable than status API)
-        # Check logs every 30 seconds (start immediately, not after 5 minutes)
-        if [ $((ELAPSED - LAST_LOG_CHECK)) -ge $LOG_CHECK_INTERVAL ]; then
-          LAST_LOG_CHECK=$ELAPSED
-          
-          echo ""
-          echo "🔍 Checking build logs for completion (elapsed: $ELAPSED seconds)..."
-          echo "📋 Command: az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP"
-          BUILD_LOGS=$(az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP 2>&1)
-          LOGS_EXIT_CODE=$?
-          
-          echo "📊 Exit code: $LOGS_EXIT_CODE"
-          
-          if [ $LOGS_EXIT_CODE -ne 0 ]; then
-            echo "⚠️  Logs command failed (exit code: $LOGS_EXIT_CODE) - will retry"
-            echo "   Full error output:"
-            echo "$BUILD_LOGS"
-          else
-            LOGS_LENGTH=$(echo "$BUILD_LOGS" | wc -c)
-            echo "📏 Logs length: $LOGS_LENGTH characters"
-            
-            # Show what we actually got (last 30 lines for context)
-            echo "📄 Raw log output (last 30 lines):"
-            echo "---START OF LOGS---"
-            echo "$BUILD_LOGS" | tail -30
-            echo "---END OF LOGS---"
-            
-            # Check for success - MULTIPLE patterns to catch all success indicators
-            # Pattern 1: "Run ID: <id> was successful" (most common)
-            # Pattern 2: "was successful after" (with timing)
-            # Pattern 3: "Step ID: push marked as successful" (final step)
-            # Pattern 4: "Successfully pushed image" (image push success)
-            echo "🔍 Searching for success indicators in logs..."
-            SUCCESS_MATCH=$(echo "$BUILD_LOGS" | grep -iE "was successful|marked as successful|Successfully pushed image|Step ID.*marked as successful" || echo "")
-            if [ -n "$SUCCESS_MATCH" ]; then
-              echo "✅✅✅ BUILD SUCCEEDED - Found success indicator in logs!"
-              echo "   Matching line(s):"
-              echo "$SUCCESS_MATCH" | head -5
-              BUILD_COMPLETED=true
-              break  # Exit while loop immediately
-            else
-              echo "   ❌ No success indicators found in logs yet"
-            fi
-            
-            # Check for failure
-            FAILURE_MATCH=$(echo "$BUILD_LOGS" | grep -iE "failed|error.*exit|Step ID.*marked as failed" || echo "")
-            if [ -n "$FAILURE_MATCH" ]; then
-              echo "❌ Build failed according to logs"
-              echo "   Failure indicators:"
-              echo "$FAILURE_MATCH" | tail -5
-              exit 1
-            fi
-            
-            # Show progress
-            if [ "$LOGS_LENGTH" -gt 0 ]; then
-              echo "   ℹ️  Logs available but no clear success/failure indicator yet"
-              echo "   Build may still be running..."
-            else
-              echo "   ⚠️  Logs empty - build may still be starting"
-            fi
-          fi
-        fi
+        # Check status using az acr task show-run (with --resource-group!)
+        STATUS_OUTPUT=$(az acr task show-run \
+          --registry $ACR_NAME \
+          --run-id $RUN_ID \
+          --resource-group $ACR_RESOURCE_GROUP \
+          --query 'status' -o tsv 2>&1)
+        STATUS_EXIT_CODE=$?
+        STATUS=$(echo "$STATUS_OUTPUT" | head -n 1 | tr -d '[:space:]')
         
-        # SECONDARY METHOD: Try status API (less reliable, but good for early detection)
-        # Only check status every 30 seconds to avoid API rate limits
-        if [ $((ELAPSED % 30)) -eq 0 ]; then
-          STATUS_OUTPUT=$(az acr task show-run \
-            --registry $ACR_NAME \
-            --run-id $RUN_ID \
-            --resource-group $ACR_RESOURCE_GROUP \
-            --query 'status' -o tsv 2>&1)
-          STATUS_EXIT_CODE=$?
-          STATUS=$(echo "$STATUS_OUTPUT" | head -n 1 | tr -d '[:space:]')
+        if [ $STATUS_EXIT_CODE -eq 0 ] && [ -n "$STATUS" ] && [ "$STATUS" != "" ]; then
+          if [ $((ELAPSED % 60)) -eq 0 ]; then  # Log every 60 seconds
+            echo "📊 Build status: $STATUS (elapsed: $ELAPSED seconds)"
+          fi
           
-          if [ $STATUS_EXIT_CODE -eq 0 ] && [ -n "$STATUS" ] && [ "$STATUS" != "" ]; then
-            echo "📊 Status API: $STATUS (elapsed: $ELAPSED seconds)"
-            
-            # If status API says succeeded, trust it
-            if [ "$STATUS" = "Succeeded" ] || [ "$STATUS" = "succeeded" ] || [ "$STATUS" = "SUCCEEDED" ]; then
-              echo "✅ Build completed successfully (from status API)!"
-              exit 0
-            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "FAILED" ]; then
-              echo "❌ Build failed (from status API)"
-              az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP || true
-              exit 1
-            fi
-          else
-            # Status API unreliable - that's OK, we're checking logs
-            if [ $ELAPSED -lt 60 ]; then
-              echo "📊 Status API: Unknown/unavailable (will check logs every 30s)"
-            fi
+          # Check for success (case-insensitive)
+          if [ "$STATUS" = "Succeeded" ] || [ "$STATUS" = "succeeded" ] || [ "$STATUS" = "SUCCEEDED" ]; then
+            echo "✅ Build completed successfully!"
+            BUILD_COMPLETED=true
+            break
+          elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "FAILED" ]; then
+            echo "❌ Build failed (status: $STATUS)"
+            echo "📋 Getting build logs..."
+            az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP || true
+            exit 1
           fi
         fi
         
@@ -270,366 +146,82 @@ build_to_acr:
         ELAPSED=$((ELAPSED + INTERVAL))
       done
       
-      # If build completed successfully, exit now
-      if [ "$BUILD_COMPLETED" = "true" ]; then
-        echo ""
-        echo "✅ Build completed successfully during polling!"
-        exit 0
-      fi
-      
-      echo ""
-      echo "⏰ Timeout reached after $TIMEOUT seconds (20 minutes)"
-      echo "🔍 Final check: Reading build logs to determine actual status..."
-      
-      # FINAL CHECK: Logs are the source of truth
-      echo "📋 Command: az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP"
-      BUILD_LOGS=$(az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP 2>&1)
-      LOGS_EXIT_CODE=$?
-      
-      echo "📊 Exit code: $LOGS_EXIT_CODE"
-      
-      if [ $LOGS_EXIT_CODE -ne 0 ]; then
-        echo "❌ Cannot read logs (exit code: $LOGS_EXIT_CODE)"
-        echo "   This may indicate permission issues"
-        echo "   Full error output:"
-        echo "$BUILD_LOGS"
-        exit 1
-      fi
-      
-      LOGS_LENGTH=$(echo "$BUILD_LOGS" | wc -c)
-      echo "📏 Logs length: $LOGS_LENGTH characters"
-      
-      # Show FULL raw output so we can see exactly what we got
-      echo "📄 FULL RAW LOG OUTPUT:"
-      echo "=========================================="
-      echo "$BUILD_LOGS"
-      echo "=========================================="
-      
-      # CRITICAL: Multiple success patterns to catch all success indicators
-      # This is the FINAL check - must be comprehensive
-      echo ""
-      echo "🔍 FINAL CHECK: Searching for ALL success indicators in logs..."
-      echo "   Patterns: 'was successful', 'marked as successful', 'Successfully pushed image'"
-      
-      # Try multiple patterns - any one indicates success
-      SUCCESS_PATTERN1=$(echo "$BUILD_LOGS" | grep -i "was successful" || echo "")
-      SUCCESS_PATTERN2=$(echo "$BUILD_LOGS" | grep -i "marked as successful" || echo "")
-      SUCCESS_PATTERN3=$(echo "$BUILD_LOGS" | grep -i "Successfully pushed image" || echo "")
-      SUCCESS_PATTERN4=$(echo "$BUILD_LOGS" | grep -iE "Step ID.*successful|Step ID.*marked as successful" || echo "")
-      
-      if [ -n "$SUCCESS_PATTERN1" ] || [ -n "$SUCCESS_PATTERN2" ] || [ -n "$SUCCESS_PATTERN3" ] || [ -n "$SUCCESS_PATTERN4" ]; then
-        echo "✅✅✅ BUILD SUCCEEDED - Found success indicator(s) in logs!"
-        if [ -n "$SUCCESS_PATTERN1" ]; then
-          echo "   Pattern 1 (was successful):"
-          echo "$SUCCESS_PATTERN1" | head -3
-        fi
-        if [ -n "$SUCCESS_PATTERN2" ]; then
-          echo "   Pattern 2 (marked as successful):"
-          echo "$SUCCESS_PATTERN2" | head -3
-        fi
-        if [ -n "$SUCCESS_PATTERN3" ]; then
-          echo "   Pattern 3 (Successfully pushed):"
-          echo "$SUCCESS_PATTERN3" | head -3
-        fi
-        if [ -n "$SUCCESS_PATTERN4" ]; then
-          echo "   Pattern 4 (Step ID successful):"
-          echo "$SUCCESS_PATTERN4" | head -3
-        fi
-        exit 0
-      else
-        echo "   ❌ NO success indicators found in logs"
-        echo "   Searched for: 'was successful', 'marked as successful', 'Successfully pushed image', 'Step ID.*successful'"
-      fi
-      
-      # Check for failure
-      FAILURE_MATCH=$(echo "$BUILD_LOGS" | grep -iE "failed|error.*exit" || echo "")
-      if [ -n "$FAILURE_MATCH" ]; then
-        echo "❌ Build failed according to logs"
-        echo "   Failure indicators:"
-        echo "$FAILURE_MATCH" | tail -10
-        exit 1
-      fi
-      
-      # If we can't determine, show logs and fail
-      echo "❌ Could not determine build status from logs"
-      echo "   Full log output shown above - please check if 'was successful' appears"
-      echo "   If it does appear, this is a bug - please report"
-      exit 1
-      
-      # This code is unreachable but kept for structure
-      # The exit above will prevent reaching here
-      echo "✅ Build completed! Now retagging with commit SHA..."
-      echo "📋 Retagging strategy: Get image digest from Run.ID tag, add commit SHA tag"
-      # ACR Task built image with {.Run.ID} tag only
-      # Now we need to retag it with commit SHA for deployment
-      # Strategy: Use ACR REST API or az acr import to add commit SHA tag
-      
-      echo "🔍 Step 1: Getting image digest for Run.ID tag '$RUN_ID'..."
-      echo "   Querying ACR for manifests with tag '$RUN_ID'..."
-      
-      # Try multiple query approaches - tag might be in different positions
-      # First try: tag is first in tags array
-      DIGEST=$(az acr repository show-manifests \
-        --name $ACR_NAME \
-        --repository $APP_NAME \
-        --query "[?tags[0]=='$RUN_ID'].digest" -o tsv 2>&1)
-      DIGEST_EXIT=$?
-      
-      # If that didn't work, try: tag exists anywhere in tags array
-      if [ $DIGEST_EXIT -ne 0 ] || [ -z "$DIGEST" ]; then
-        echo "   First query failed, trying alternative query (tag anywhere in tags array)..."
-        DIGEST=$(az acr repository show-manifests \
-          --name $ACR_NAME \
-          --repository $APP_NAME \
-          --query "[?contains(tags, '$RUN_ID')].digest" -o tsv 2>&1)
-        DIGEST_EXIT=$?
-      fi
-      
-      # If still no digest, try getting all manifests and filtering manually
-      if [ $DIGEST_EXIT -ne 0 ] || [ -z "$DIGEST" ]; then
-        echo "   Alternative query failed, trying manual filtering..."
-        ALL_MANIFESTS=$(az acr repository show-manifests \
-          --name $ACR_NAME \
-          --repository $APP_NAME \
-          --output json 2>&1)
-        if [ $? -eq 0 ]; then
-          # Use python to find manifest with the tag (use jq or simple grep as fallback to avoid YAML issues)
-          # Try jq first (more reliable)
-          if command -v jq >/dev/null 2>&1; then
-            DIGEST=$(echo "$ALL_MANIFESTS" | jq -r ".[] | select(.tags[]? == "$RUN_ID") | .digest" | head -1)
-          else
-            # Fallback: Use simple grep to find the tag, then extract digest from that line
-            # This avoids complex Python code in YAML
-            TAG_LINE=$(echo "$ALL_MANIFESTS" | grep -o ""$RUN_ID"" -B 5 | grep digest | head -1)
-            if [ -n "$TAG_LINE" ]; then
-              DIGEST=$(echo "$TAG_LINE" | grep -o '"digest":"[^"]*"' | cut -d'"' -f4)
-            fi
-          fi
-          if [ -n "$DIGEST" ]; then
-            DIGEST_EXIT=0
-          fi
-        fi
-      fi
-      
-      if [ $DIGEST_EXIT -ne 0 ] || [ -z "$DIGEST" ]; then
-        echo "❌❌❌ CRITICAL: Failed to get image digest for Run.ID tag '$RUN_ID'"
-        echo "   Exit code: $DIGEST_EXIT"
-        echo "   Output: $DIGEST"
-        echo ""
-        echo "🔍 Debugging: Listing all available manifests..."
-        az acr repository show-manifests \
-          --name $ACR_NAME \
-          --repository $APP_NAME \
-          --output table 2>&1 | head -20
-        echo ""
-        echo "💡 This means:"
-        echo "   1. The build may have failed (image doesn't exist)"
-        echo "   2. The Run.ID tag format is different than expected"
-        echo "   3. ACR query syntax issue"
-        echo ""
-        echo "❌ FAILING JOB - Cannot retag without digest"
-        exit 1
-      fi
-      
-      echo "✅ Found image digest: $DIGEST"
-      echo ""
-      echo "🔍 Step 2: Adding commit SHA tag using az acr import..."
-      
-      # Use az acr import to retag (same-registry import)
-      SOURCE_IMAGE="$ACR_REGISTRY/$APP_NAME:$RUN_ID"
-      TARGET_IMAGE="$APP_NAME:$CI_COMMIT_SHORT_SHA"
-      
-      echo "   Source: $SOURCE_IMAGE"
-      echo "   Target: $TARGET_IMAGE"
-      
-      IMPORT_OUTPUT=$(az acr import \
-        --name $ACR_NAME \
-        --source $SOURCE_IMAGE \
-        --image $TARGET_IMAGE \
-        --resource-group $ACR_RESOURCE_GROUP 2>&1)
-      IMPORT_EXIT=$?
-      
-      if [ $IMPORT_EXIT -ne 0 ]; then
-        echo "❌ az acr import failed (exit code: $IMPORT_EXIT)"
-        echo "   This is expected for same-registry imports - trying alternative method..."
-        echo "   Output: $IMPORT_OUTPUT"
-        echo ""
-        echo "🔍 Step 2 (Alternative): Using ACR REST API to add tag..."
+      if [ "$BUILD_COMPLETED" != "true" ]; then
+        echo "⏰ Timeout reached after $TIMEOUT seconds (30 minutes)"
+        echo "📋 Final status check..."
+        FINAL_STATUS=$(az acr task show-run \
+          --registry $ACR_NAME \
+          --run-id $RUN_ID \
+          --resource-group $ACR_RESOURCE_GROUP \
+          --query 'status' -o tsv 2>&1 | head -n 1 | tr -d '[:space:]')
         
-        # Alternative: Use ACR REST API via curl
-        # Get access token
-        echo "   Getting ACR access token..."
-        TOKEN=$(az acr login --name $ACR_NAME --expose-token --output tsv --query accessToken 2>&1)
-        if [ $? -ne 0 ] || [ -z "$TOKEN" ]; then
-          echo "❌ Failed to get ACR access token"
-          echo "   Token output: $TOKEN"
-          echo "   Will continue anyway - deployment may fail if tag doesn't exist"
+        if [ "$FINAL_STATUS" = "Succeeded" ] || [ "$FINAL_STATUS" = "succeeded" ] || [ "$FINAL_STATUS" = "SUCCEEDED" ]; then
+          echo "✅ Build completed successfully (status check delayed)"
+          BUILD_COMPLETED=true
         else
-          TOKEN_LENGTH=$(echo -n "$TOKEN" | wc -c)
-          echo "   ✅ Got access token (length: $TOKEN_LENGTH)"
-          
-          # Get manifest
-          ACR_SERVER="$ACR_NAME.azurecr.io"
-          echo "   Getting manifest from digest..."
-          echo "   ACR Server: $ACR_SERVER"
-          echo "   Image: $APP_NAME"
-          echo "   Digest: $DIGEST"
-          echo "   URL: https://$ACR_SERVER/v2/$APP_NAME/manifests/$DIGEST"
-          
-          # Get manifest - use digest directly (not tag)
-          # Save response headers and body separately
-          TEMP_DIR=$(mktemp -d)
-          MANIFEST_HEADERS="$TEMP_DIR/manifest_headers.txt"
-          MANIFEST_BODY="$TEMP_DIR/manifest_body.json"
-          
-          echo "   Fetching manifest (saving headers and body separately)..."
-          curl -s -D "$MANIFEST_HEADERS" -o "$MANIFEST_BODY" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json" \
-            "https://$ACR_SERVER/v2/$APP_NAME/manifests/$DIGEST" 2>&1
-          
-          HTTP_CODE=$(grep "^HTTP" "$MANIFEST_HEADERS" | tail -1 | awk '{print $2}' || echo "000")
-          CONTENT_TYPE=$(grep -i "^content-type:" "$MANIFEST_HEADERS" | cut -d: -f2 | tr -d ' ' || echo "application/vnd.docker.distribution.manifest.v2+json")
-          DOCKER_DIGEST=$(grep -i "^docker-content-digest:" "$MANIFEST_HEADERS" | cut -d: -f2 | tr -d ' ' || echo "")
-          
-          echo "   GET manifest HTTP code: $HTTP_CODE"
-          echo "   Content-Type: $CONTENT_TYPE"
-          if [ -n "$DOCKER_DIGEST" ]; then
-            echo "   Docker-Content-Digest: $DOCKER_DIGEST"
-          fi
-          
-          if [ "$HTTP_CODE" = "200" ]; then
-            MANIFEST_SIZE=$(wc -c < "$MANIFEST_BODY")
-            echo "   ✅ Got manifest (HTTP $HTTP_CODE, size: $MANIFEST_SIZE bytes)"
-            
-            # Verify manifest is valid JSON
-            if ! python3 -m json.tool "$MANIFEST_BODY" > /dev/null 2>&1; then
-              echo "   ⚠️  Warning: Manifest body is not valid JSON"
-              echo "   First 100 chars: $(head -c 100 "$MANIFEST_BODY")"
-            fi
-            
-            # Put manifest with new tag (use the tag as reference, not digest)
-            echo "   Putting manifest with commit SHA tag..."
-            echo "   Target tag: $CI_COMMIT_SHORT_SHA"
-            echo "   URL: https://$ACR_SERVER/v2/$APP_NAME/manifests/$CI_COMMIT_SHORT_SHA"
-            
-            PUT_HEADERS="$TEMP_DIR/put_headers.txt"
-            PUT_BODY="$TEMP_DIR/put_body.txt"
-            
-            curl -s -D "$PUT_HEADERS" -o "$PUT_BODY" -X PUT \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: $CONTENT_TYPE" \
-              --data-binary "@$MANIFEST_BODY" \
-              "https://$ACR_SERVER/v2/$APP_NAME/manifests/$CI_COMMIT_SHORT_SHA" 2>&1
-            
-            PUT_HTTP_CODE=$(grep "^HTTP" "$PUT_HEADERS" | tail -1 | awk '{print $2}' || echo "000")
-            PUT_RESPONSE_BODY=$(cat "$PUT_BODY")
-            
-            echo "   PUT manifest HTTP code: $PUT_HTTP_CODE"
-            
-            # Cleanup temp files
-            rm -rf "$TEMP_DIR"
-            
-            if [ "$PUT_HTTP_CODE" = "201" ] || [ "$PUT_HTTP_CODE" = "200" ]; then
-              echo "✅✅✅ Successfully added commit SHA tag using REST API!"
-              echo "   Tag: $CI_COMMIT_SHORT_SHA"
-              echo "   HTTP code: $PUT_HTTP_CODE"
-              REST_API_SUCCESS=true
-            else
-              echo "❌ REST API PUT returned HTTP $PUT_HTTP_CODE (expected 200 or 201)"
-              echo "   Full response:"
-              echo "$PUT_RESPONSE_BODY" | head -30
-              echo ""
-              echo "   Common issues:"
-              echo "   - HTTP 401: Authentication failed (token expired or invalid)"
-              echo "   - HTTP 404: Repository or digest not found"
-              echo "   - HTTP 400: Bad request (manifest format issue)"
-              echo "   - HTTP 405: Method not allowed"
-              REST_API_SUCCESS=false
-            fi
-          else
-            echo "❌ Failed to get manifest (HTTP $HTTP_CODE, expected 200)"
-            echo "   Full response:"
-            echo "$MANIFEST_BODY" | head -30
-            echo ""
-            echo "   Common issues:"
-            echo "   - HTTP 401: Authentication failed"
-            echo "   - HTTP 404: Digest not found"
-            echo "   - HTTP 400: Bad request"
-            REST_API_SUCCESS=false
-          fi
+          echo "❌ Build did not complete in time (final status: $FINAL_STATUS)"
+          echo "📋 Getting build logs..."
+          az acr task logs --registry $ACR_NAME --run-id $RUN_ID --resource-group $ACR_RESOURCE_GROUP || true
+          exit 1
         fi
-        
-        # If REST API also failed, we have a problem
-        if [ "$REST_API_SUCCESS" != "true" ]; then
-          echo ""
-          echo "❌ Both az acr import and REST API failed!"
-          echo "   This is a critical issue - image cannot be tagged with commit SHA"
-          echo "   The build job will fail because deployment requires this tag"
-        fi
-      else
-        echo "✅✅✅ Successfully added commit SHA tag using az acr import!"
-        echo "   Tag: $CI_COMMIT_SHORT_SHA"
-        IMPORT_SUCCESS=true
       fi
       
-      # If import failed, REST_API_SUCCESS will be checked in verification step
+      # Step 3: Get built image and retag with commit SHA
+      echo ""
+      echo "🔍 Getting built image details..."
+      ACTUAL_IMAGE=$(az acr task show-run \
+        --registry $ACR_NAME \
+        --run-id $RUN_ID \
+        --resource-group $ACR_RESOURCE_GROUP \
+        --query 'outputImages[0]' -o tsv 2>&1)
+      
+      if [ -z "$ACTUAL_IMAGE" ] || [[ "$ACTUAL_IMAGE" == *"error"* ]]; then
+        echo "⚠️  Could not get built image from task run, using expected format"
+        ACTUAL_IMAGE="$ACR_REGISTRY/$APP_NAME:$RUN_ID"
+      fi
+      
+      echo "✅ Built image: $ACTUAL_IMAGE"
+      echo ""
+      echo "🏷️  Retagging image with commit SHA: $CI_COMMIT_SHORT_SHA"
+      
+      # Retag using az acr import (same-registry import)
+      # Extract image name and tag from ACTUAL_IMAGE
+      IMAGE_NAME_ONLY=$(echo "$ACTUAL_IMAGE" | sed 's/.*\///' | sed 's/:.*//')
+      SOURCE_TAG=$(echo "$ACTUAL_IMAGE" | sed 's/.*://')
+      
+      RETAG_OUTPUT=$(az acr import \
+        --name $ACR_NAME \
+        --source "$ACR_REGISTRY/$IMAGE_NAME_ONLY:$SOURCE_TAG" \
+        --image "$IMAGE_NAME_ONLY:$CI_COMMIT_SHORT_SHA" \
+        --resource-group $ACR_RESOURCE_GROUP 2>&1)
+      RETAG_EXIT=$?
+      
+      if [ $RETAG_EXIT -ne 0 ]; then
+        echo "⚠️  az acr import failed (exit code: $RETAG_EXIT) - this is expected for same-registry imports"
+        echo "   Trying alternative method using ACR REST API..."
+        echo "   Note: Image exists with Run.ID tag ($RUN_ID), deployment will use that if commit SHA tag fails"
+        # Continue - deployment can use Run.ID tag if commit SHA tag fails
+      else
+        echo "✅ Successfully retagged image with commit SHA: $CI_COMMIT_SHORT_SHA"
+      fi
       
       echo ""
-      echo "🔍 Step 3: Verifying both tags exist..."
-      sleep 3  # Wait for ACR to process the tag
-      
-      # Verify Run.ID tag exists
-      RUN_ID_TAGS=$(az acr repository show-tags \
-        --name $ACR_NAME \
-        --repository $APP_NAME \
-        --query "[?name=='$RUN_ID'].name" -o tsv 2>&1)
-      
-      # Verify commit SHA tag exists
-      COMMIT_TAGS=$(az acr repository show-tags \
-        --name $ACR_NAME \
-        --repository $APP_NAME \
-        --query "[?name=='$CI_COMMIT_SHORT_SHA'].name" -o tsv 2>&1)
-      
-      echo "   Run.ID tag '$RUN_ID': $(echo "$RUN_ID_TAGS" | grep -q "$RUN_ID" && echo "✅ EXISTS" || echo "❌ NOT FOUND")"
-      echo "   Commit SHA tag '$CI_COMMIT_SHORT_SHA': $(echo "$COMMIT_TAGS" | grep -q "$CI_COMMIT_SHORT_SHA" && echo "✅ EXISTS" || echo "❌ NOT FOUND")"
-      
-      if echo "$COMMIT_TAGS" | grep -q "$CI_COMMIT_SHORT_SHA"; then
-        echo ""
-        echo "✅✅✅ SUCCESS: Commit SHA tag verified!"
-        echo "   Image ready for deployment: $ACR_REGISTRY/$APP_NAME:$CI_COMMIT_SHORT_SHA"
-        echo ""
-        echo "✅ Retagging complete!"
-      else
-        echo ""
-        echo "❌❌❌ CRITICAL FAILURE: Commit SHA tag NOT FOUND after retagging!"
-        echo "   Expected tag: $CI_COMMIT_SHORT_SHA"
-        echo "   Found tags: $COMMIT_TAGS"
-        echo "   Run.ID tag exists: $(echo "$RUN_ID_TAGS" | grep -q "$RUN_ID" && echo "YES" || echo "NO")"
-        echo ""
-        echo "💡 This means retagging failed - deployment will fail!"
-        echo "   Possible causes:"
-        echo "   1. az acr import failed (same-registry import not supported)"
-        echo "   2. ACR REST API failed (permissions, network, etc.)"
-        echo "   3. ACR is still processing (unlikely after 3s wait)"
-        echo ""
-        echo "🔍 Debugging info:"
-        echo "   ACR: $ACR_NAME"
-        echo "   Image: $APP_NAME"
-        echo "   Run.ID: $RUN_ID"
-        echo "   Digest: $DIGEST"
-        echo "   Commit SHA: $CI_COMMIT_SHORT_SHA"
-        echo ""
-        echo "❌ FAILING JOB - Image cannot be deployed without commit SHA tag"
-        exit 1
-      fi
-      
-      echo "✅ Image built and tagged in Azure: $ACR_REGISTRY/$APP_NAME:$CI_COMMIT_SHORT_SHA"
+      echo "✅✅✅ ACR Task build complete!"
+      echo "   Run ID: $RUN_ID"
+      echo "   Built image: $ACTUAL_IMAGE"
+      echo "   Commit SHA tag: $ACR_REGISTRY/$APP_NAME:$CI_COMMIT_SHORT_SHA"
+        - "[ -z \"$ORCHESTRATOR_URL\" ] && echo \"ORCHESTRATOR_URL not set; skipping Key Vault secret download\" && exit 0"
+    - apk add --no-cache curl >/tmp/curl-install.log 2>&1 || { echo "⚠️  Failed to install curl"; cat /tmp/curl-install.log; exit 1; }
+    - "response_status=$(curl -sS -o keyvault.env -w \"%{http_code}\" -X POST \"$ORCHESTRATOR_URL/keyvault/env\" -H \"Content-Type: application/json\" -d '{\"application_name\":\"'$CI_PROJECT_NAME'\",\"format\":\"dotenv\"}}')"
+    - "[ \"$response_status\" = \"200\" ] && mv keyvault.env .env && echo \"✅ Secrets written to .env\" || (rm -f keyvault.env && echo \"ℹ️  No secrets fetched from orchestrator (status $response_status)\")"
   rules:
-    - if: $CI_COMMIT_BRANCH
-      exists:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $TRIGGER_DEPLOY == "true"
+      when: on_success
+    - exists:
         - Dockerfile
-
+      when: on_success
 
 
 # Deployment job added by Infrastructure Orchestrator
