@@ -54,6 +54,9 @@ build_to_acr:
       # Azure uses the stored token when running the task - we don't need to pass it again
       # The token comes from the GitLab integration (http://localhost:3331/admin/gitlab)
       # If task fails with 'failed to download context', click 'Refresh Configs' to recreate task with fresh token
+      echo "📋 Executing: az acr task run --name $ACR_TASK_NAME --registry $ACR_NAME --resource-group $ACR_RESOURCE_GROUP --set GIT_REF=$GIT_REF"
+      
+      # Capture both stdout and stderr
       RUN_ID_OUTPUT=$(az acr task run \
         --name $ACR_TASK_NAME \
         --registry $ACR_NAME \
@@ -63,31 +66,48 @@ build_to_acr:
       
       RUN_ID_EXIT=$?
       
+      # Always show the output for debugging
+      echo "📊 Command output (exit code: $RUN_ID_EXIT):"
+      echo "$RUN_ID_OUTPUT" | while IFS= read -r line; do
+        echo "   $line"
+      done
+      
       if [ $RUN_ID_EXIT -ne 0 ]; then
-        echo "❌ Failed to trigger ACR Task"
-        echo "   Exit code: $RUN_ID_EXIT"
-        echo "   Error output: $RUN_ID_OUTPUT"
+        echo ""
+        echo "❌ Failed to trigger ACR Task (exit code: $RUN_ID_EXIT)"
         echo ""
         echo "💡 Troubleshooting steps:"
-        echo "   1. Verify ACR Task exists: az acr task show --name $ACR_TASK_NAME --registry $ACR_NAME --resource-group $ACR_RESOURCE_GROUP"
-        echo "   2. Check if task is accessible: az acr task list --registry $ACR_NAME --resource-group $ACR_RESOURCE_GROUP"
-        echo "   3. Verify service principal has permissions: az role assignment list --assignee $AZURE_CLIENT_ID"
-        echo "   4. Run 'Update w/ ACR Tasks' in orchestrator UI to recreate the task"
+        echo "   1. Verify ACR Task exists:"
+        echo "      az acr task show --name $ACR_TASK_NAME --registry $ACR_NAME --resource-group $ACR_RESOURCE_GROUP"
+        echo "   2. Check if task is accessible:"
+        echo "      az acr task list --registry $ACR_NAME --resource-group $ACR_RESOURCE_GROUP"
+        echo "   3. Verify service principal has permissions:"
+        echo "      az role assignment list --assignee $AZURE_CLIENT_ID"
+        echo "   4. Click 'Refresh Configs' in orchestrator UI to recreate the task with fresh token"
+        echo ""
+        echo "🔍 Full error output:"
+        echo "$RUN_ID_OUTPUT"
         exit 1
       fi
       
       # Extract RUN_ID from output (might have warnings/error messages mixed in)
-      # Run IDs are typically 3-4 character alphanumeric strings (e.g., 'cak', 'cah', 'car', 'cay', 'ca12')
+      # Run IDs are typically 3-4 character alphanumeric strings (e.g., 'cak', 'cah', 'car', 'ca12')
+      # First try: Look for "run with ID: xxx" pattern
       RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE 'run with ID: [a-z0-9]{3,4}' | sed 's/.*: //' | head -1 || echo "")
       
-      # Method 2: Look for standalone 3-4 character alphanumeric strings
+      # Method 2: Look for standalone 3-4 character alphanumeric strings (word boundaries)
       if [ -z "$RUN_ID" ]; then
         RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE '\b[a-z0-9]{3,4}\b' | head -1 || echo "")
       fi
       
-      # Method 3: Look for any line that's just a 3-4 character alphanumeric string
+      # Method 3: Look for any line that's just a 3-4 character alphanumeric string (exact match)
       if [ -z "$RUN_ID" ]; then
         RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -xE '[a-z0-9]{3,4}' | head -1 | tr -d '[:space:]' || echo "")
+      fi
+      
+      # Method 4: Try to parse JSON output if query returned JSON
+      if [ -z "$RUN_ID" ]; then
+        RUN_ID=$(echo "$RUN_ID_OUTPUT" | grep -oE '"runId"[[:space:]]*:[[:space:]]*"[a-z0-9]{3,4}"' | sed 's/.*"runId"[[:space:]]*:[[:space:]]*"//' | sed 's/".*//' | head -1 || echo "")
       fi
       
       if [ -z "$RUN_ID" ]; then
