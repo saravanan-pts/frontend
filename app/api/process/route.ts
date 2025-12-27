@@ -21,22 +21,20 @@ export async function POST(request: NextRequest) {
     if (!textContent) return NextResponse.json({ error: "No text content" }, { status: 400 });
 
     // 2. Create Document Record
+    // Note: graphOps.createDocument now handles createdAt automatically
     const document = await graphOps.createDocument({
         filename: fileName || "input.txt",
         content: textContent,
         fileType: "text",
-        processedAt: new Date().toISOString(),
-        entityCount: 0,
-        relationshipCount: 0
     });
 
-    // 3. Process Sequentially (Essential for "NEXT" Logic)
+    // 3. Process Sequentially
     const lines = textContent.split('\n').filter(line => line.trim().length > 0);
     if(approvedMapping && lines.length > 0 && lines[0].includes(approvedMapping[0]?.header_column)) {
         lines.shift(); // Skip Header
     }
 
-    const BATCH_SIZE = 100; // Safe batch size
+    const BATCH_SIZE = 100; 
     const rowsToProcess = lines.slice(0, BATCH_SIZE); 
     
     console.log(`Processing ${rowsToProcess.length} rows...`);
@@ -50,13 +48,15 @@ export async function POST(request: NextRequest) {
         
         let currentEventId: string | null = null;
         const sanitizeId = (label: string) => label ? label.trim().replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() : "unknown";
+        
+        // FIX: Shared timestamp for this batch row
+        const now = new Date().toISOString(); 
 
         // A. Insert Entities
         for (const entity of result.entities) {
             if(!entity.label) continue;
             const id = `entity:${sanitizeId(entity.label)}`;
             
-            // Check if this is the "Event" node
             if (['Event', 'Activity', 'Transaction', 'Log'].includes(entity.type)) {
                 currentEventId = id;
             }
@@ -67,12 +67,14 @@ export async function POST(request: NextRequest) {
                     type: entity.type || "Concept",
                     properties: entity.properties || {}, 
                     metadata: { source: document.id },
-                    updatedAt: new Date().toISOString()
+                    // FIX: Mandatory fields
+                    createdAt: now,
+                    updatedAt: now
                 });
             } catch (err) {
                 await db.merge(id, {
                     properties: entity.properties || {},
-                    updatedAt: new Date().toISOString()
+                    updatedAt: now
                 });
             }
             entitiesInserted++;
@@ -84,30 +86,35 @@ export async function POST(request: NextRequest) {
             const fromId = `entity:${sanitizeId(rel.from)}`;
             const toId = `entity:${sanitizeId(rel.to)}`;
             
-            // --- SELF-HEALING: Auto-create missing nodes ---
-            try { 
-                await db.create(fromId, { label: rel.from, type: "Implicit", metadata: { source: document.id } }); 
-            } catch(e) { /* Exists */ }
-            try { 
-                await db.create(toId, { label: rel.to, type: "Implicit", metadata: { source: document.id } }); 
-            } catch(e) { /* Exists */ }
-            // -----------------------------------------------
+            // Self-Healing with createdAt
+            try { await db.create(fromId, { label: rel.from, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
+            try { await db.create(toId, { label: rel.to, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
 
             const relType = (rel.type || "RELATED_TO").replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
 
-            // Unlock Table & Insert
+            // Unlock Table & Insert (Adding createdAt)
             try { 
                 await db.query(`DEFINE TABLE ${relType} SCHEMALESS PERMISSIONS FULL`); 
-                await db.query(`RELATE ${fromId}->${relType}->${toId} SET confidence=1.0, source=$doc`, { doc: document.id });
+                await db.query(`
+                    RELATE ${fromId}->${relType}->${toId} 
+                    SET confidence=1.0, 
+                        source=$doc,
+                        createdAt='${now}'
+                `, { doc: document.id });
                 relsInserted++;
             } catch (e) { console.error(e); }
         }
 
-        // C. Insert Timeline Chain
+        // C. Insert Timeline Chain (Adding createdAt)
         if (lastEventId && currentEventId) {
             try {
                 await db.query(`DEFINE TABLE NEXT SCHEMALESS PERMISSIONS FULL`);
-                await db.query(`RELATE ${lastEventId}->NEXT->${currentEventId} SET type='Sequence', source=$doc`, { doc: document.id });
+                await db.query(`
+                    RELATE ${lastEventId}->NEXT->${currentEventId} 
+                    SET type='Sequence', 
+                        source=$doc,
+                        createdAt='${now}'
+                `, { doc: document.id });
                 relsInserted++;
             } catch (e) {}
         }

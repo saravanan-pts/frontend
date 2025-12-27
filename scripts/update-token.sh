@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 ENV_FILE=".env.local"
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}SurrealDB Token Updater${NC}"
+echo -e "${BLUE}SurrealDB Token Updater (Fixed)${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
@@ -26,7 +26,7 @@ fi
 echo -e "${YELLOW}⚠️  Important:${NC}"
 echo "1. Go to https://surrealdb.com/cloud"
 echo "2. Navigate to your instance → Authentication → Tokens"
-echo "3. Generate a new token with full permissions"
+echo "3. Generate a new token with FULL permissions"
 echo "4. Copy the token"
 echo ""
 
@@ -52,27 +52,29 @@ fi
 cp "$ENV_FILE" "${ENV_FILE}.backup"
 echo -e "${GREEN}✅ Backup created: ${ENV_FILE}.backup${NC}"
 
-# Update token in .env.local
+# Update NEXT_PUBLIC_SURREALDB_TOKEN (Client & Server Access)
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
+    sed -i '' "s|NEXT_PUBLIC_SURREALDB_TOKEN=.*|NEXT_PUBLIC_SURREALDB_TOKEN=$new_token|" "$ENV_FILE"
+    # Also update non-public version if it exists, just in case
     sed -i '' "s|SURREALDB_TOKEN=.*|SURREALDB_TOKEN=$new_token|" "$ENV_FILE"
 else
     # Linux
+    sed -i "s|NEXT_PUBLIC_SURREALDB_TOKEN=.*|NEXT_PUBLIC_SURREALDB_TOKEN=$new_token|" "$ENV_FILE"
     sed -i "s|SURREALDB_TOKEN=.*|SURREALDB_TOKEN=$new_token|" "$ENV_FILE"
 fi
 
 # Verify the update
-if grep -q "SURREALDB_TOKEN=$new_token" "$ENV_FILE"; then
+if grep -q "NEXT_PUBLIC_SURREALDB_TOKEN=$new_token" "$ENV_FILE"; then
     echo -e "${GREEN}✅ Token updated successfully!${NC}"
     echo ""
-    echo -e "${BLUE}Next steps:${NC}"
-    echo "1. Restart your development server (Ctrl+C then npm run dev)"
-    echo "2. Check the connection indicator in the UI"
-    echo "3. Try uploading text or a file to verify"
+    echo -e "${BLUE}Next steps (CRITICAL):${NC}"
+    echo "1. Stop your server (Ctrl+C)"
+    echo "2. Restart it: npm run dev"
+    echo "3. Run your upload script again: node scripts/upload-datasets.js"
 else
-    echo -e "${RED}❌ Error: Failed to update token${NC}"
+    echo -e "${RED}❌ Error: Failed to update token. Check if NEXT_PUBLIC_SURREALDB_TOKEN exists in your .env.local${NC}"
     echo "Restoring backup..."
     mv "${ENV_FILE}.backup" "$ENV_FILE"
     exit 1
 fi
-

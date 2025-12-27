@@ -1,15 +1,83 @@
 #!/bin/bash
 
-# 1. Read the CSV content safely
-# This reads the file and escapes it for JSON
-CONTENT=$(awk '{printf "%s\\n", $0}' /home/ubuntu/example/car_ins_demo.csv | sed 's/"/\\"/g')
 
-# 2. Send as JSON
-curl -v -X POST http://localhost:3111/api/process \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"fileName\": \"car_ins_demo.csv\",
-    \"textContent\": \"$CONTENT\",
-    \"saveToMemory\": false,
-    \"approvedMapping\": [] 
-  }"
+
+# Define the list of files to import
+
+FILES=(
+
+  "/home/ubuntu/example/car_insurance_datasets/Account_Lifecycle_Log.csv"
+
+  "/home/ubuntu/example/car_insurance_datasets/Call_Center_Sales_Log_CLEAN.csv"
+
+  "/home/ubuntu/example/car_insurance_datasets/Claim_Processing_Event_Log_CLEAN.csv"
+
+  "/home/ubuntu/example/car_insurance_datasets/Claims_Document_Log_CLEAN.csv"
+
+)
+
+
+
+# API Endpoint
+
+URL="http://localhost:3111/api/process"
+
+
+
+# Loop through each file
+
+for FILE_PATH in "${FILES[@]}"; do
+
+  FILE_NAME=$(basename "$FILE_PATH")
+
+  
+
+  echo "----------------------------------------------------------------"
+
+  echo "Processing: $FILE_NAME"
+
+  echo "Path: $FILE_PATH"
+
+
+
+  # Check if file exists
+
+  if [ ! -f "$FILE_PATH" ]; then
+
+    echo " Error: File not found!"
+
+    continue
+
+  fi
+
+
+
+  # 1. Read the CSV content safely
+
+  # Escapes double quotes for JSON compatibility
+
+  CONTENT=$(awk '{printf "%s\\n", $0}' "$FILE_PATH" | sed 's/"/\\"/g')
+
+
+
+  # 2. Send as JSON
+
+  # NOTE: We put the curl command mostly on one line to prevent "command not found" errors
+
+  echo " Uploading..."
+
+  
+
+  curl -X POST "$URL" -H "Content-Type: application/json" -d "{ \"fileName\": \"$FILE_NAME\", \"textContent\": \"$CONTENT\", \"saveToMemory\": false, \"approvedMapping\": [] }"
+
+
+
+  echo -e "\nDone with $FILE_NAME"
+
+done
+
+
+
+echo "----------------------------------------------------------------"
+
+echo " All imports finished."
