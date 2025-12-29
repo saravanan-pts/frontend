@@ -41,7 +41,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
   ({ onNodeSelect, onNodeDeselect, onEdgeSelect, onEdgeDeselect, onContextMenu, onCreateNode, onCreateRelationship }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<Core | null>(null);
-    const dragSourceRef = useRef<string | null>(null);
     const pendingDataRef = useRef<{ entities: Entity[]; relationships: Relationship[] } | null>(null);
 
     useEffect(() => {
@@ -65,7 +64,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         const entityColors: Record<string, string> = {
           Person: "#3b82f6", Organization: "#10b981", Location: "#f59e0b",
           Concept: "#8b5cf6", Technology: "#06b6d4",
-          // PROD: Event Colors
           Event: "#ef4444", Activity: "#ef4444", Transaction: "#f97316",
           Customer: "#3b82f6", Account: "#6366f1", Branch: "#10b981"
         };
@@ -84,7 +82,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                   "label": (ele) => {
                     const lbl = ele.data("label");
                     const time = ele.data("timestamp");
-                    // PROD: Show Timestamp
                     return time ? `${lbl}\n(${time.split('T')[1]?.substring(0,5)})` : lbl;
                   },
                   "width": 40, "height": 40, "text-wrap": "wrap", "text-max-width": "100px",
@@ -100,7 +97,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                   "label": "data(type)", "font-size": "8px", "text-rotation": "autorotate"
                 },
               },
-              // PROD: Highlight NEXT Sequence
               {
                 selector: 'edge[type="NEXT"]',
                 style: {
@@ -109,6 +105,8 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 }
               },
               { selector: "node:selected", style: { "border-width": 4, "border-color": "#f59e0b" } },
+              // CSS Class for Filtering
+              { selector: ".hidden", style: { "display": "none" } }
             ],
             layout: { name: "cola", animate: false } as any,
             minZoom: 0.1, maxZoom: 2,
@@ -139,7 +137,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             data: { id: e.id, label: e.label, type: e.type, ...e.properties }
           }));
           
-          // PROD: STRICT FILTERING (No Ghosts)
           const validIds = new Set(nodes.map(n => n.data.id));
           const edges = relationships
             .filter(r => validIds.has(r.from) && validIds.has(r.to))
@@ -152,7 +149,43 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
       },
       addNode: () => {}, addEdge: () => {}, updateNode: () => {}, updateEdge: () => {},
       removeNode: () => {}, removeEdge: () => {}, highlightNode: () => {}, highlightEdge: () => {},
-      filterByType: () => {}, exportGraph: () => {}, fit: () => cyRef.current?.fit(), resetZoom: () => {}
+      
+      // --- FILTER IMPLEMENTATION ---
+      filterByType: (types: string[]) => {
+        if (!cyRef.current) return;
+        const cy = cyRef.current;
+        cy.batch(() => {
+          cy.elements().removeClass("hidden");
+          if (types.length > 0) {
+             // Hide all nodes that DO NOT match the selected types
+             // selector: "node[type != 'Person'][type != 'Organization']"
+             const selector = types.map(t => `[type != "${t}"]`).join("");
+             cy.nodes(selector).addClass("hidden");
+             
+             // Also hide edges connected to hidden nodes
+             cy.edges().forEach(edge => {
+               if (edge.source().hasClass("hidden") || edge.target().hasClass("hidden")) {
+                 edge.addClass("hidden");
+               }
+             });
+          }
+        });
+      },
+      // -----------------------------
+
+      exportGraph: (format) => { 
+          if(format === 'json') {
+              const json = cyRef.current?.json();
+              const blob = new Blob([JSON.stringify(json)], {type: "application/json"});
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a'); a.href=url; a.download='graph.json'; a.click();
+          } else {
+              const png = cyRef.current?.png({ full: true });
+              if(png) { const a = document.createElement('a'); a.href=png; a.download='graph.png'; a.click(); }
+          }
+      },
+      fit: () => cyRef.current?.fit(),
+      resetZoom: () => cyRef.current?.resetZoom()
     }));
 
     return <div ref={containerRef} className="w-full h-full border border-gray-300 rounded-lg" style={{ minHeight: "400px" }} />;

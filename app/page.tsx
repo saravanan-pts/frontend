@@ -16,7 +16,7 @@ import EntityForm from "@/components/EntityForm";
 import RelationshipForm from "@/components/RelationshipForm";
 import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
-import { useGraph } from "@/hooks/useGraph"; // Using the new Secure Hook
+import { useGraph } from "@/hooks/useGraph"; 
 import { useSurrealDB } from "@/hooks/useSurrealDB";
 import { Upload, FileText, Info, Settings } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
@@ -30,14 +30,13 @@ export default function Home() {
     entities, 
     relationships, 
     loadGraph, 
-    searchGraph, // <--- The new Search Function
+    searchGraph, 
     createEntity, 
     updateEntity, 
     deleteEntity, 
     createRelationship, 
     updateRelationship, 
     deleteRelationship, 
-    getRelationship, 
     selectRelationship 
   } = useGraph();
 
@@ -88,7 +87,6 @@ export default function Home() {
   // 3. Update Visualization when Data Changes
   useEffect(() => {
     if (graphRef.current) {
-      // Small delay to ensure UI is ready
       const timeoutId = setTimeout(() => {
         graphRef.current?.loadGraphData(entities, relationships);
       }, 100);
@@ -145,7 +143,7 @@ export default function Home() {
     }
   };
 
-  // --- Search Handler (Connected to API) ---
+  // --- Search Handler (FIXED) ---
   const handleSearch = async (query: string) => {
     if (!query.trim()) {
       // If search is cleared, reload original data
@@ -154,14 +152,20 @@ export default function Home() {
     }
     
     try {
-      const results = await searchGraph(query);
-      // Update the Store directly with search results
-      useGraphStore.getState().setEntities(results);
-      // Optional: Clear edges to focus on the search results
-      useGraphStore.getState().setRelationships([]);
+      // 1. Call API
+      const result = await searchGraph(query);
       
-      toast.success(`Found ${results.length} matches`);
+      // 2. Validate Result
+      const newEntities = result.entities || [];
+      const newRelationships = result.relationships || [];
+
+      // 3. Update Store with correct data structure
+      useGraphStore.getState().setEntities(newEntities);
+      useGraphStore.getState().setRelationships(newRelationships);
+      
+      toast.success(`Found ${newEntities.length} matches`);
     } catch (e) {
+      console.error("Search Error:", e);
       toast.error("Search failed");
     }
   };
@@ -216,7 +220,6 @@ export default function Home() {
     } else if (relationshipOrId) {
       relationship = relationshipOrId;
     } else {
-      // Try to find from context menu
       const relId = contextMenu?.edgeId;
       if (relId) relationship = relationships.find((r) => r.id === relId);
     }
@@ -287,7 +290,6 @@ export default function Home() {
               <h1 className="text-2xl font-bold text-gray-900">
                 Knowledge Graph POC
               </h1>
-              {/* Status Dot */}
               <div
                 className={`w-3 h-3 rounded-full ${
                   entities.length > 0 ? "bg-green-500" : "bg-gray-400"
@@ -315,7 +317,6 @@ export default function Home() {
               />
             </div>
             
-            {/* UPDATED: GraphControls with onSearch */}
             <GraphControls 
               graphRef={graphRef}
               onCreateNode={handleCreateNode}

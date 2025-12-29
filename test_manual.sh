@@ -6,13 +6,7 @@
 
 FILES=(
 
-  "/home/ubuntu/example/car_insurance_datasets/Account_Lifecycle_Log.csv"
-
-  "/home/ubuntu/example/car_insurance_datasets/Call_Center_Sales_Log_CLEAN.csv"
-
-  "/home/ubuntu/example/car_insurance_datasets/Claim_Processing_Event_Log_CLEAN.csv"
-
-  "/home/ubuntu/example/car_insurance_datasets/Claims_Document_Log_CLEAN.csv"
+  "/home/ubuntu/example/car_ins_demo.csv"
 
 )
 
