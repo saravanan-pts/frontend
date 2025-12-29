@@ -26,68 +26,93 @@ export class AzureOpenAIService {
     }
   }
 
-  // --- MERGED LOGIC: Strict Mapping + Event Detection ---
-  async extractGraphWithMapping(rowText: string, mapping: any[]): Promise<EntityExtractionResult> {
-    if (!this.client) throw new Error("Azure OpenAI client not initialized");
+  // --- 1. GENERIC COMPLETION (For Community Summaries) ---
+  // Used by: services/graph-analytics.ts
+  async generateCompletion(prompt: string, jsonMode: boolean = true): Promise<any> {
+    return this.callOpenAI(prompt, 0.5, jsonMode);
+  }
 
-    // 1. Convert User Mapping to Rules
+  // --- 2. ENTITY COMPARISON (For Entity Resolution) ---
+  // Used by: services/entity-resolver.ts
+  async areEntitiesSame(newEntity: any, existingEntity: any): Promise<boolean> {
+      const prompt = `
+        Task: Entity Resolution
+        Compare these two entities and determine if they refer to the SAME real-world object or person.
+        
+        Entity A: "${newEntity.label}" (Type: ${newEntity.type})
+        Context A: ${JSON.stringify(newEntity.properties)}
+
+        Entity B: "${existingEntity.label}" (Type: ${existingEntity.type})
+        Context B: ${JSON.stringify(existingEntity.properties)}
+
+        Reply with JSON only: { "isMatch": true } or { "isMatch": false }
+      `;
+      
+      try {
+          const result = await this.callOpenAI(prompt, 0.0, true);
+          return result.isMatch === true;
+      } catch (e) {
+          console.warn("Resolution failed, assuming false", e);
+          return false;
+      }
+  }
+
+  // --- 3. ADVANCED GRAPH EXTRACTION ---
+  // Used by: services/document-processor.ts
+  // UPGRADE: Now forces extraction of "description" for context-aware resolution.
+  async extractEntitiesAndRelationships(text: string): Promise<EntityExtractionResult> {
+    const prompt = `
+      Analyze this text and extract Knowledge Graph elements.
+      
+      ### EXTRACTION RULES
+      1. **Entities:** Extract precise entities (Person, Organization, Location, Event, Concept).
+         - **CRITICAL:** You MUST add a 'description' property to every entity summarizing its context (e.g. "CEO of Google", "Date of meeting"). 
+         - This 'description' is required for identifying duplicates later.
+      2. **Relationships:** Use precise verbs (EMPLOYED_BY, LOCATED_IN, PERFORMED). Avoid generic "RELATED_TO".
+      3. **Events:** If the text describes a specific action/transaction, create an 'Event' node.
+      
+      ### INPUT TEXT
+      ${text.substring(0, 8000)}
+
+      ### OUTPUT FORMAT (JSON)
+      { 
+        "entities": [ { "label": "...", "type": "...", "properties": { "description": "..." } } ], 
+        "relationships": [ { "from": "...", "to": "...", "type": "..." } ] 
+      }
+    `;
+    return this.callOpenAI(prompt, 0.0, true);
+  }
+
+  // --- 4. STRUCTURED MAPPING EXTRACTION ---
+  // Used by: services/document-processor.ts (for CSV/Excel)
+  async extractGraphWithMapping(rowText: string, mapping: any[]): Promise<EntityExtractionResult> {
     const rules = mapping.map((m: any) => 
       `- If you see column "${m.header_column}", create relationship "${m.relationship_type}" to entity "${m.target_entity}".`
     ).join("\n");
 
-    // 2. Combined Prompt (Strict + Events)
     const prompt = `
-      You are an expert in Knowledge Graphs and Process Mining.
+      You are an expert in Knowledge Graphs.
       
-      ### PART 1: USER MAPPING RULES
+      ### MAPPING RULES
       ${rules}
 
-      ### PART 2: EVENT & TIME RULES (CRITICAL)
-      1. **Identify the Event:** If the row describes an action (e.g., "Login", "Purchase", "Claim"), label that node as 'Event', 'Activity', or 'Transaction'.
-      2. **Timestamps:** If you find a Date or Time, do **NOT** create a separate node. Instead, add it as a property called 'timestamp' to the Event node.
-      3. **Entities:** Extract other entities (Customer, Branch, etc.) as usual.
-
-      ### PART 3: FORBIDDEN (STRICT MODE)
-      - **DO NOT use "RELATED_TO"** under any circumstances. Use specific verbs (e.g. "PERFORMED", "OCCURRED_AT") or the ones defined in the mapping.
-      - If a column does not match a rule or an event property, **IGNORE IT**. Do not invent relationships.
-
-      ### INPUT DATA
+      ### ENRICHMENT RULES
+      1. **Context:** Add a 'description' property to every entity based on the other columns in the row.
+      2. **Events:** If the row represents a log or transaction, treat the main entity as an 'Event'.
+      
+      ### INPUT ROW
       ${rowText}
 
-      ### OUTPUT JSON FORMAT
-      {
-        "entities": [ 
-          {"type": "Event", "label": "Login", "confidence": 1.0, "properties": { "timestamp": "2023-10-01T10:00:00Z" }},
-          {"type": "Customer", "label": "C001", "confidence": 1.0}
-        ],
-        "relationships": [ 
-          {"from": "C001", "to": "Login", "type": "PERFORMED", "confidence": 1.0} 
-        ]
-      }
+      ### OUTPUT JSON
+      { "entities": [...], "relationships": [...] }
     `;
-
-    return this.callOpenAI(prompt, 0.0);
+    return this.callOpenAI(prompt, 0.0, true);
   }
 
-  // Fallback for raw text (Legacy support)
-  async extractEntitiesAndRelationships(text: string): Promise<EntityExtractionResult> {
-    const prompt = `
-      Analyze this text as an Event Log / Audit Trail.
-      
-      ### RULES
-      1. **Events:** Identify specific events/actions.
-      2. **Timestamps:** Extract timestamps as properties of Event nodes (do not create Date nodes).
-      3. **STRICT VERBS:** Do NOT use "RELATED_TO". Use specific verbs like "WORKS_AT", "LOCATED_IN", "PERFORMED".
-      
-      Input: ${text.substring(0, 8000)}
-    `;
-    return this.callOpenAI(prompt, 0.1);
-  }
-
-  private async callOpenAI(prompt: string, temperature: number): Promise<EntityExtractionResult> {
-    if (!this.client) throw new Error("Client not ready");
-    const deploymentName = process.env.AZURE_OPENAI_DEPLOYMENT_NAME;
-    if (!deploymentName) throw new Error("Deployment name missing");
+  // --- HELPER ---
+  private async callOpenAI(prompt: string, temperature: number, jsonMode: boolean): Promise<any> {
+    if (!this.client) throw new Error("Azure OpenAI Client not initialized");
+    const deploymentName = process.env.AZURE_OPENAI_DEPLOYMENT_NAME || "";
 
     let attempt = 0;
     while (attempt < this.maxRetries) {
@@ -95,37 +120,33 @@ export class AzureOpenAIService {
         const response = await this.client.getChatCompletions(
           deploymentName,
           [
-            { role: "system", content: "You are a precise JSON extractor. Respond with valid JSON only." },
+            { role: "system", content: "You are a precise Knowledge Graph extractor. Output valid JSON only." },
             { role: "user", content: prompt }
           ],
-          { temperature, maxTokens: 4000, responseFormat: { type: "json_object" } }
+          { 
+              temperature, 
+              maxTokens: 4000, 
+              responseFormat: jsonMode ? { type: "json_object" } : undefined 
+          }
         );
 
-        const content = response.choices[0]?.message?.content;
-        if (!content) throw new Error("No content");
-        return this.parseExtractionResult(content);
+        const content = response.choices[0]?.message?.content || "{}";
+        
+        if (jsonMode) {
+             // Clean potential markdown formatting
+             const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+             return JSON.parse(cleaned);
+        }
+        return content;
 
       } catch (error: any) {
         attempt++;
+        console.warn(`[AzureOpenAI] Attempt ${attempt} failed: ${error.message}`);
         if (attempt >= this.maxRetries) throw error;
         await this.sleep(this.baseDelay * Math.pow(2, attempt - 1));
       }
     }
-    throw new Error("Retries exhausted");
-  }
-
-  private parseExtractionResult(content: string): EntityExtractionResult {
-    try {
-      const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-      const parsed = JSON.parse(cleaned);
-      return {
-        entities: Array.isArray(parsed.entities) ? parsed.entities : [],
-        relationships: Array.isArray(parsed.relationships) ? parsed.relationships : []
-      };
-    } catch (e) {
-      console.error("JSON Parse Error", e);
-      return { entities: [], relationships: [] };
-    }
+    throw new Error("Azure OpenAI Retries exhausted");
   }
 
   private sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }

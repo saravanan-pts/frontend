@@ -1,5 +1,6 @@
 import { azureOpenAI } from "./azure-openai";
 import { graphOps } from "./graph-operations";
+import { entityResolver } from "./entity-resolver"; // <--- NEW: Import the Resolver
 import type {
   EntityExtractionResult,
   ExtractedEntity,
@@ -53,10 +54,12 @@ export class DocumentProcessor {
     });
 
     // Create entities and relationships in database
+    // UPDATED: Now uses the smart entityResolver
     const createdEntities = await this.createEntitiesFromExtraction(
       merged.entities,
       document.id
     );
+    
     const createdRelationships = await this.createRelationshipsFromExtraction(
       processedRelationships,
       createdEntities,
@@ -323,42 +326,28 @@ export class DocumentProcessor {
     return processed;
   }
 
+  // --- UPDATED: Uses Entity Resolver ---
   private async createEntitiesFromExtraction(
     extractedEntities: ExtractedEntity[],
     sourceDocumentId: string
   ): Promise<Entity[]> {
     const createdEntities: Entity[] = [];
 
+    // Process sequentially to allow the resolver to find duplicates it just created
     for (const extracted of extractedEntities) {
       try {
-        // Check if entity already exists by label
-        const existing = await graphOps.searchEntities(extracted.label);
-        let entity: Entity;
-
-        if (existing.length > 0) {
-          // Use existing entity
-          entity = existing[0];
-        } else {
-          // Create new entity
-          entity = await graphOps.createEntity({
-            type: extracted.type,
-            label: extracted.label,
-            properties: extracted.properties || {},
-            metadata: {
-              source: sourceDocumentId,
-              confidence: extracted.confidence,
-            },
-          });
-        }
-
+        // Delegate to the Smart Resolver
+        // This checks DB, fuzzy matches, and uses AI for final disambiguation
+        const entity = await entityResolver.resolveAndCreate(extracted, sourceDocumentId);
         createdEntities.push(entity);
       } catch (error) {
-        console.error(`Error creating entity ${extracted.label}:`, error);
+        console.error(`Error resolving entity ${extracted.label}:`, error);
       }
     }
 
     return createdEntities;
   }
+  // -------------------------------------
 
   private async createRelationshipsFromExtraction(
     extractedRelationships: ExtractedRelationship[],
@@ -422,4 +411,3 @@ export class DocumentProcessor {
 }
 
 export const documentProcessor = new DocumentProcessor();
-
