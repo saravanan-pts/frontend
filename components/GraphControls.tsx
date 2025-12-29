@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ZoomIn, ZoomOut, Maximize2, Search, Download, X, Plus, Link2 } from "lucide-react";
+// Added Sparkles icon for AI feature
+import { ZoomIn, ZoomOut, Maximize2, Search, Download, X, Plus, Link2, Sparkles } from "lucide-react";
 import type { EntityType } from "@/types";
 import { ENTITY_TYPES } from "@/lib/schema";
 import { useGraphStore } from "@/lib/store";
@@ -15,17 +16,21 @@ interface GraphControlsProps {
   }>;
   onCreateNode?: () => void;
   onCreateRelationship?: () => void;
-  // NEW: Accept search handler
   onSearch: (query: string) => void;
+  onAnalyze?: () => void; // <--- New Prop
 }
 
-export default function GraphControls({ graphRef, onCreateNode, onCreateRelationship, onSearch }: GraphControlsProps) {
+export default function GraphControls({ 
+    graphRef, 
+    onCreateNode, 
+    onCreateRelationship, 
+    onSearch,
+    onAnalyze 
+}: GraphControlsProps) {
   const { filterTypes, toggleFilterType, clearFilters } = useGraphStore();
   const [searchQuery, setSearchQuery] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
-  const handleZoomIn = () => {}; // Zoom handled by Cytoscape internally
-  const handleZoomOut = () => {};
   const handleFit = () => { graphRef.current?.fit(); };
   const handleResetZoom = () => { graphRef.current?.resetZoom(); };
   const handleExportPNG = () => { graphRef.current?.exportGraph("png"); };
@@ -44,7 +49,6 @@ export default function GraphControls({ graphRef, onCreateNode, onCreateRelation
     graphRef.current?.filterByType([]);
   };
 
-  // NEW: Trigger search on Enter key
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       onSearch(searchQuery);
@@ -54,7 +58,7 @@ export default function GraphControls({ graphRef, onCreateNode, onCreateRelation
   return (
     <div className="bg-white border-b border-gray-200 p-2 lg:p-4 shadow-sm">
       <div className="flex flex-wrap items-center gap-2 lg:gap-4">
-        {/* Buttons */}
+        {/* Creation Buttons */}
         {(onCreateNode || onCreateRelationship) && (
           <div className="flex items-center gap-1 lg:gap-2 border-r border-gray-200 pr-2 lg:pr-4">
             {onCreateNode && (
@@ -76,7 +80,7 @@ export default function GraphControls({ graphRef, onCreateNode, onCreateRelation
           <button onClick={handleResetZoom} className="p-2 hover:bg-gray-100 rounded text-sm" title="Reset">1:1</button>
         </div>
 
-        {/* SEARCH BAR (Updated) */}
+        {/* SEARCH BAR */}
         <div className="flex-1 min-w-[120px] lg:min-w-[200px]">
           <div className="relative">
             <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -85,14 +89,26 @@ export default function GraphControls({ graphRef, onCreateNode, onCreateRelation
               placeholder="Search (Press Enter)..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={handleKeyDown} // Listen for Enter key
+              onKeyDown={handleKeyDown}
               className="w-full pl-8 pr-4 py-1 lg:py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
         </div>
 
+        {/* --- NEW: ANALYZE BUTTON --- */}
+        {onAnalyze && (
+            <button 
+                onClick={onAnalyze}
+                className="flex items-center gap-1 lg:gap-2 px-3 py-2 bg-purple-600 text-white rounded text-sm hover:bg-purple-700 transition-colors shadow-sm ml-2"
+                title="Detect Communities & Themes (AI)"
+            >
+                <Sparkles className="w-4 h-4" /> 
+                <span className="hidden sm:inline">Analyze Graph</span>
+            </button>
+        )}
+
         {/* Filters */}
-        <div className="relative">
+        <div className="relative ml-2">
           <button onClick={() => setShowFilters(!showFilters)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded text-sm">
             Filters {filterTypes.length > 0 && `(${filterTypes.length})`}
           </button>

@@ -3,9 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import GraphVisualization, {
-  type GraphVisualizationRef,
-} from "@/components/GraphVisualization";
+import GraphVisualization, { type GraphVisualizationRef } from "@/components/GraphVisualization";
 import GraphControls from "@/components/GraphControls";
 import GraphSelector from "@/components/GraphSelector";
 import NodeDetailPanel from "@/components/NodeDetailPanel";
@@ -25,12 +23,13 @@ export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
   const { activeTab, setActiveTab, setSelectedEntity } = useGraphStore();
   
-  // Get all data and actions from our new Secure Hook
+  // Get all data and actions including analyzeGraph
   const { 
     entities, 
     relationships, 
     loadGraph, 
     searchGraph, 
+    analyzeGraph, // <--- NEW IMPORT
     createEntity, 
     updateEntity, 
     deleteEntity, 
@@ -112,22 +111,10 @@ export default function Home() {
     }
   };
 
-  const handleRelationshipSubmit = async (
-    from: string,
-    to: string,
-    type: string,
-    properties?: any,
-    confidence?: number
-  ) => {
+  const handleRelationshipSubmit = async (from: string, to: string, type: string, properties?: any, confidence?: number) => {
     try {
       if (editingRelationship) {
-        await updateRelationship(editingRelationship.id, {
-          from,
-          to,
-          type,
-          properties,
-          confidence,
-        });
+        await updateRelationship(editingRelationship.id, { from, to, type, properties, confidence });
         toast.success("Relationship updated successfully");
       } else {
         await createRelationship(from, to, type, properties, confidence);
@@ -143,23 +130,17 @@ export default function Home() {
     }
   };
 
-  // --- Search Handler (FIXED) ---
   const handleSearch = async (query: string) => {
     if (!query.trim()) {
-      // If search is cleared, reload original data
       loadGraph(selectedDocumentId);
       return;
     }
     
     try {
-      // 1. Call API
       const result = await searchGraph(query);
-      
-      // 2. Validate Result
       const newEntities = result.entities || [];
       const newRelationships = result.relationships || [];
 
-      // 3. Update Store with correct data structure
       useGraphStore.getState().setEntities(newEntities);
       useGraphStore.getState().setRelationships(newRelationships);
       
@@ -167,6 +148,19 @@ export default function Home() {
     } catch (e) {
       console.error("Search Error:", e);
       toast.error("Search failed");
+    }
+  };
+
+  // --- NEW: ANALYZE HANDLER ---
+  const handleAnalyze = async () => {
+    const toastId = toast.loading("Analyzing Graph & Detecting Communities...");
+    try {
+        await analyzeGraph();
+        toast.success("Analysis Complete! Loading new insights...", { id: toastId });
+        await loadGraph(selectedDocumentId); // Reload to see the new 'Community' nodes
+    } catch (e) {
+        toast.error("Analysis Failed", { id: toastId });
+        console.error(e);
     }
   };
 
@@ -321,7 +315,8 @@ export default function Home() {
               graphRef={graphRef}
               onCreateNode={handleCreateNode}
               onCreateRelationship={handleCreateRelationship}
-              onSearch={handleSearch} 
+              onSearch={handleSearch}
+              onAnalyze={handleAnalyze} // <--- Pass the new handler
             />
 
             <div className="flex-1 relative">

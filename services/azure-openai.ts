@@ -50,7 +50,8 @@ export class AzureOpenAIService {
       
       try {
           const result = await this.callOpenAI(prompt, 0.0, true);
-          return result.isMatch === true;
+          // Handle both boolean and string responses safely
+          return result.isMatch === true || result.isMatch === "true";
       } catch (e) {
           console.warn("Resolution failed, assuming false", e);
           return false;
@@ -59,7 +60,6 @@ export class AzureOpenAIService {
 
   // --- 3. ADVANCED GRAPH EXTRACTION ---
   // Used by: services/document-processor.ts
-  // UPGRADE: Now forces extraction of "description" for context-aware resolution.
   async extractEntitiesAndRelationships(text: string): Promise<EntityExtractionResult> {
     const prompt = `
       Analyze this text and extract Knowledge Graph elements.
@@ -133,7 +133,6 @@ export class AzureOpenAIService {
         const content = response.choices[0]?.message?.content || "{}";
         
         if (jsonMode) {
-             // Clean potential markdown formatting
              const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
              return JSON.parse(cleaned);
         }
