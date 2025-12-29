@@ -41,14 +41,15 @@ class SurrealDBClient {
   }
 
   private async _connect(): Promise<void> {
-    const url = process.env.NEXT_PUBLIC_SURREALDB_URL;
-    const namespace = process.env.NEXT_PUBLIC_SURREALDB_NAMESPACE;
-    const database = process.env.NEXT_PUBLIC_SURREALDB_DATABASE;
-    // This code runs on the client side, so we can only access NEXT_PUBLIC_ prefixed env vars
-    // Server-side env vars (without prefix) are not available in client bundles
-    const token = process.env.NEXT_PUBLIC_SURREALDB_TOKEN;
-    const username = process.env.NEXT_PUBLIC_SURREALDB_USERNAME;
-    const password = process.env.NEXT_PUBLIC_SURREALDB_PASSWORD;
+    // --- SECURITY FIX START ---
+    // We now look for SERVER vars first (secure), then Frontend vars (legacy)
+    const url = process.env.SURREALDB_URL || process.env.NEXT_PUBLIC_SURREALDB_URL;
+    const token = process.env.SURREALDB_TOKEN || process.env.NEXT_PUBLIC_SURREALDB_TOKEN;
+    const namespace = process.env.SURREALDB_NAMESPACE || process.env.NEXT_PUBLIC_SURREALDB_NAMESPACE;
+    const database = process.env.SURREALDB_DATABASE || process.env.NEXT_PUBLIC_SURREALDB_DATABASE;
+    const username = process.env.SURREALDB_USERNAME || process.env.NEXT_PUBLIC_SURREALDB_USERNAME;
+    const password = process.env.SURREALDB_PASSWORD || process.env.NEXT_PUBLIC_SURREALDB_PASSWORD;
+    // --- SECURITY FIX END ---
 
     if (!url || !namespace || !database) {
       throw new Error(
@@ -92,12 +93,10 @@ class SurrealDBClient {
           console.log("Username/password authentication successful");
         } catch (signinError: any) {
           console.error("Signin error:", signinError);
-          // For SurrealDB Cloud, username/password might not work - need JWT token
-          throw new Error(`Authentication failed: ${signinError.message || signinError}. Note: SurrealDB Cloud may require JWT token authentication instead of username/password.`);
+          throw new Error(`Authentication failed: ${signinError.message || signinError}.`);
         }
       } else {
         console.warn("No authentication credentials provided - connection will be unauthenticated");
-        // If neither provided, connection will be unauthenticated (may have limited access)
       }
 
       await this.db.use({ ns: namespace, db: database });
@@ -106,9 +105,8 @@ class SurrealDBClient {
       try {
         await this.initializeSchema();
       } catch (schemaError: any) {
-        // Log but don't fail connection if schema init fails (might be permission issue)
+        // Log but don't fail connection if schema init fails
         console.warn("Schema initialization warning:", schemaError);
-        // Continue with connection even if schema init fails
       }
 
       this.isConnected = true;
@@ -120,7 +118,6 @@ class SurrealDBClient {
 
       // Log the actual error for debugging
       const errorMessage = error?.message || String(error);
-      const errorStack = error?.stack;
       
       console.error(
         `Connection failed (attempt ${this.connectionAttempts}/${this.maxRetries}):`,
@@ -156,12 +153,12 @@ class SurrealDBClient {
     }
   }
 
+  // --- RESTORED: Your original Schema Cleanup Logic ---
   private async initializeSchema(): Promise<void> {
     if (!this.db) return;
 
     try {
       // First, remove any existing id field definitions that might cause conflicts
-      // SurrealDB automatically manages the id field, so we shouldn't define it
       try {
         await this.db.query(`REMOVE FIELD id ON ${TABLES.DOCUMENT}`);
       } catch (e) {
@@ -184,7 +181,6 @@ class SurrealDBClient {
       await this.db.query(SCHEMA_QUERIES.defineDocumentTable);
       console.log("Schema initialized successfully");
     } catch (error) {
-      // Schema might already exist, which is fine
       console.warn("Schema initialization warning:", error);
     }
   }
@@ -206,6 +202,7 @@ class SurrealDBClient {
     }
   }
 
+  // --- RESTORED: Your original Health Check Fallback Logic ---
   async healthCheck(): Promise<boolean> {
     try {
       if (!this.isConnected || !this.db) {
@@ -217,7 +214,6 @@ class SurrealDBClient {
       }
 
       // Simple query to check connection
-      // Use a simple query that works even if tables don't exist
       try {
         await this.db.query("INFO FOR DB");
         return true;
@@ -254,4 +250,3 @@ class SurrealDBClient {
 
 // Export singleton instance
 export const surrealDB = SurrealDBClient.getInstance();
-

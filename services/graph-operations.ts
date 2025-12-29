@@ -2,26 +2,167 @@ import { surrealDB } from "@/lib/surrealdb-client";
 import { TABLES } from "@/lib/schema";
 import type { Entity, Relationship, Document } from "@/types";
 
+// PERFORMANCE CONFIGURATION
+const GRAPH_LIMITS = {
+    INITIAL_NODES: 100, 
+    MAX_EDGES: 100
+};
+
 export class GraphOperations {
   private get db() {
     return surrealDB.getClient();
   }
 
-  // --- Entity Operations ---
+  // --- NEW: Delete by Filename Helper ---
+  async deleteDocumentByFilename(filename: string): Promise<boolean> {
+      try {
+          // 1. Find the ID first
+          const query = `SELECT id FROM document WHERE filename = $filename LIMIT 1`;
+          const result = await this.db.query(query, { filename });
+          
+          // @ts-ignore
+          const record = result[0]?.result?.[0];
+          
+          if (!record || !record.id) {
+              throw new Error(`File '${filename}' not found in database.`);
+          }
+
+          console.log(`[GraphOps] Found ID ${record.id} for file '${filename}'. Deleting...`);
+          
+          // 2. Call the main delete function using the found ID
+          return await this.deleteDocument(record.id);
+
+      } catch (e: any) {
+          console.error("Delete by Filename Error:", e);
+          throw e;
+      }
+  }
+
+  // --- 1. CASCADE DELETE (Main Logic) ---
+  async deleteDocument(id: string): Promise<boolean> {
+      try {
+          console.log(`[GraphOps] Starting cascade delete for document: ${id}`);
+          
+          const info = await this.db.query('INFO FOR DB');
+          // @ts-ignore
+          const tablesObject = info[0]?.result?.tables || {}; 
+          const allTableNames = Object.keys(tablesObject);
+          
+          const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
+          const edgeTables = allTableNames.filter(t => !exclude.includes(t));
+
+          // Delete Relationships
+          for (const table of edgeTables) {
+             try { await this.db.query(`DELETE FROM ${table} WHERE source = $id`, { id }); } catch(e) {}
+          }
+
+          // Delete Entities
+          await this.db.query(`DELETE FROM entity WHERE metadata.source = $id`, { id });
+
+          // Delete Document
+          await this.db.delete(id);
+          
+          console.log(`[GraphOps] Successfully deleted document ${id} and its data.`);
+          return true;
+      } catch (e: any) {
+          console.error("Delete Document Error:", e);
+          throw new Error("Failed to delete document: " + e.message);
+      }
+  }
+
+  // --- 2. SEARCH & FILTER API ---
+  async searchEntities(query: string, typeFilter?: string) {
+    try {
+      let sql = `SELECT * FROM ${TABLES.ENTITY} WHERE label ~ $query`;
+      if (typeFilter && typeFilter !== "ALL") {
+        sql += ` AND type = $typeFilter`;
+      }
+      sql += ` LIMIT 20`; 
+
+      const result = await this.db.query(sql, { query, typeFilter });
+      // @ts-ignore
+      const searchHits = (result[0]?.result || []).map(r => this.mapRecordToEntity(r));
+
+      if (searchHits.length === 0) return { entities: [], relationships: [] };
+
+      const hitIds = searchHits.map((e: Entity) => e.id);
+      const edgeQuery = `SELECT * FROM relationship WHERE in IN $ids OR out IN $ids LIMIT 100`;
+      const edgeResult = await this.db.query(edgeQuery, { ids: hitIds });
+      // @ts-ignore
+      const relationships = (edgeResult[0]?.result || []).map(r => this.mapRecordToRelationship(r));
+
+      const neighborIds = new Set<string>();
+      relationships.forEach((r: Relationship) => {
+          if (!hitIds.includes(r.from)) neighborIds.add(r.from);
+          if (!hitIds.includes(r.to)) neighborIds.add(r.to);
+      });
+
+      const missingIds = Array.from(neighborIds);
+      let neighbors: Entity[] = [];
+      if (missingIds.length > 0) {
+          const neighborQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
+          const neighborResult = await this.db.query(neighborQuery, { ids: missingIds });
+          // @ts-ignore
+          neighbors = (neighborResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
+      }
+
+      return { entities: [...searchHits, ...neighbors], relationships: relationships };
+    } catch (e) {
+      console.error("Search API Error:", e);
+      return { entities: [], relationships: [] };
+    }
+  }
+
+  // --- 3. GLOBAL VIEW STRATEGY ---
+  async getGraphData(documentId?: string) {
+    try {
+        console.log(`[GraphOps] Loading graph data...`);
+        const rels = await this.getAllRelationships(documentId); 
+        
+        const criticalNodeIds = new Set<string>();
+        rels.forEach(r => {
+            if(r.from) criticalNodeIds.add(r.from);
+            if(r.to) criticalNodeIds.add(r.to);
+        });
+        const requiredIds = Array.from(criticalNodeIds);
+
+        let criticalEntities: Entity[] = [];
+        if (requiredIds.length > 0) {
+            const nodeQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
+            const nodeResult = await this.db.query(nodeQuery, { ids: requiredIds });
+            // @ts-ignore
+            criticalEntities = (nodeResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
+        }
+
+        const remainingLimit = GRAPH_LIMITS.INITIAL_NODES - criticalEntities.length;
+        let fillerEntities: Entity[] = [];
+        
+        if (remainingLimit > 0) {
+            let fillerQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE true`; 
+            if (documentId) fillerQuery += ` AND metadata.source = $documentId`;
+            if (requiredIds.length > 0) fillerQuery += ` AND id NOT IN $ids`;
+            fillerQuery += ` ORDER BY updatedAt DESC LIMIT ${remainingLimit}`;
+            
+            const fillerResult = await this.db.query(fillerQuery, { ids: requiredIds, documentId });
+            // @ts-ignore
+            fillerEntities = (fillerResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
+        }
+
+        return { entities: [...criticalEntities, ...fillerEntities], relationships: rels };
+    } catch(e) {
+        console.error("Graph Load Error:", e);
+        return { entities: [], relationships: [] };
+    }
+  }
+
+  // --- 4. CRUD OPERATIONS ---
   async createEntity(entity: Omit<Entity, "id" | "createdAt" | "updatedAt">): Promise<Entity> {
     try {
       const now = new Date().toISOString();
-      const query = `CREATE ${TABLES.ENTITY} CONTENT { 
-        type: $type, label: $label, properties: $properties, 
-        metadata: $metadata, createdAt: $createdAt, updatedAt: $updatedAt 
-      }`;
-      const result = await this.db.query(query, {
-        type: entity.type, label: entity.label, properties: entity.properties || {}, 
-        metadata: entity.metadata || {}, createdAt: now, updatedAt: now,
-      });
+      const query = `CREATE ${TABLES.ENTITY} CONTENT { type: $type, label: $label, properties: $properties, metadata: $metadata, createdAt: $createdAt, updatedAt: $updatedAt }`;
+      const result = await this.db.query(query, { type: entity.type, label: entity.label, properties: entity.properties || {}, metadata: entity.metadata || {}, createdAt: now, updatedAt: now });
       // @ts-ignore
       const record = result[0]?.result?.[0];
-      if (!record) throw new Error("Failed to create entity");
       return this.mapRecordToEntity(record);
     } catch (error: any) { throw error; }
   }
@@ -36,75 +177,70 @@ export class GraphOperations {
     await this.db.delete(id);
   }
 
-  // --- GLOBAL VIEW STRATEGY ---
-  // Goal: Show the most recent activity from the WHOLE database, not just one file.
-  
-  async getGraphData() {
+  async createRelationship(from: string, to: string, type: string, properties: any = {}, confidence: number = 1): Promise<Relationship> {
+      const now = new Date().toISOString();
+      await this.db.query(`DEFINE TABLE IF NOT EXISTS ${type} SCHEMALESS PERMISSIONS FULL`);
+      const query = `RELATE $from->$type->$to CONTENT { confidence: $confidence, properties: $properties, createdAt: $createdAt }`;
+      const result = await this.db.query(query, { from, to, type, confidence, properties, createdAt: now });
+      // @ts-ignore
+      const record = result[0]?.result?.[0];
+      return this.mapRecordToRelationship(record);
+  }
+
+  async updateRelationship(id: string, updates: any): Promise<Relationship> {
+      const result = await this.db.merge(id, updates);
+      return this.mapRecordToRelationship(result);
+  }
+
+  async deleteRelationship(id: string): Promise<void> { await this.db.delete(id); }
+
+  // --- 5. CLEAR ALL DATA ---
+  async clearAllData() {
     try {
-        console.log(`[GraphOps] Loading GLOBAL graph data...`);
-
-        // 1. Fetch Latest 1000 Relationships (GLOBAL)
-        // We look at ALL tables, sorted by time.
-        const rels = await this.getAllRelationships(); 
-        console.log(`[GraphOps] Found ${rels.length} global relationships.`);
-        
-        // 2. Extract Critical Node IDs
-        // These are nodes that MUST be shown because an edge connects to them.
-        const criticalNodeIds = new Set<string>();
-        rels.forEach(r => {
-            if(r.from) criticalNodeIds.add(r.from);
-            if(r.to) criticalNodeIds.add(r.to);
-        });
-        const requiredIds = Array.from(criticalNodeIds);
-
-        // 3. Fetch the Critical Nodes
-        let criticalEntities: Entity[] = [];
-        if (requiredIds.length > 0) {
-            const nodeQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
-            const nodeResult = await this.db.query(nodeQuery, { ids: requiredIds });
-            // @ts-ignore
-            criticalEntities = (nodeResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
-        }
-
-        // 4. Fetch "Filler" Nodes (Global)
-        // If we haven't hit the 1000 limit yet, fill the rest with the newest unconnected nodes.
-        const remainingLimit = 1000 - criticalEntities.length;
-        let fillerEntities: Entity[] = [];
-        
-        if (remainingLimit > 0) {
-            let fillerQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE true`; 
-
-            // Exclude nodes we already loaded
-            if (requiredIds.length > 0) {
-                fillerQuery += ` AND id NOT IN $ids`;
-            }
-            
-            // GLOBAL SORT: Just give me the newest data from anywhere
-            fillerQuery += ` ORDER BY updatedAt DESC LIMIT ${remainingLimit}`;
-            
-            const fillerResult = await this.db.query(fillerQuery, { ids: requiredIds });
-            // @ts-ignore
-            fillerEntities = (fillerResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
-        }
-
-        // 5. Merge & Return
-        const allEntities = [...criticalEntities, ...fillerEntities];
-        console.log(`[GraphOps] Returning ${allEntities.length} entities and ${rels.length} edges.`);
-        
-        return { entities: allEntities, relationships: rels };
-
-    } catch(e) {
-        console.error("Graph Load Error:", e);
-        return { entities: [], relationships: [] };
+      console.log("[Clear] Starting full database wipe...");
+      const info = await this.db.query('INFO FOR DB');
+      // @ts-ignore
+      const tablesObject = info[0]?.result?.tables || {}; 
+      const allTables = Object.keys(tablesObject);
+      if (allTables.length === 0) return { deleted: 0 };
+      const removeQueries = allTables.map(tableName => `REMOVE TABLE ${tableName};`).join(" ");
+      await this.db.query(removeQueries);
+      return { success: true, tablesRemoved: allTables };
+    } catch (e: any) {
+      throw new Error("Failed to clear database: " + e.message);
     }
   }
 
-  // Backwards compatibility
-  async getAllEntities(): Promise<Entity[]> {
-      const data = await this.getGraphData();
-      return data.entities;
+  // --- 6. STATISTICS (New Feature) ---
+  async getStats() {
+    try {
+      // Run parallel queries for speed
+      const [entityRes, relRes, docRes] = await Promise.all([
+        this.db.query('SELECT count() FROM entity GROUP ALL'),
+        this.db.query('SELECT count() FROM relationship GROUP ALL'),
+        this.db.query('SELECT count() FROM document GROUP ALL')
+      ]);
+
+      // @ts-ignore
+      const entityCount = entityRes[0]?.result?.[0]?.count || 0;
+      // @ts-ignore
+      const relCount = relRes[0]?.result?.[0]?.count || 0;
+      // @ts-ignore
+      const docCount = docRes[0]?.result?.[0]?.count || 0;
+
+      return {
+        nodes: entityCount,
+        edges: relCount,
+        documents: docCount,
+        lastUpdated: new Date().toISOString()
+      };
+    } catch (e) {
+      console.error("Stats Error:", e);
+      return { nodes: 0, edges: 0, documents: 0 };
+    }
   }
 
+  // --- HELPERS ---
   async getAllRelationships(documentId?: string): Promise<Relationship[]> {
     try {
       const info = await this.db.query('INFO FOR DB');
@@ -113,20 +249,11 @@ export class GraphOperations {
       const allTableNames = Object.keys(tablesObject);
       const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
       const edgeTables = allTableNames.filter(t => !exclude.includes(t));
-      
       if (edgeTables.length === 0) return [];
 
-      console.log(`Scanning all edge tables...`);
-      
       let query = `SELECT * FROM ${edgeTables.join(', ')}`;
-      
-      // OPTIONAL: Only filter by document if explicitly requested (usually not in Global Mode)
-      if (documentId) {
-          query += ` WHERE source = $documentId OR source = '${documentId}'`;
-      }
-      
-      // Global Limit 1000
-      query += ` ORDER BY createdAt DESC LIMIT 1000`; 
+      if (documentId) query += ` WHERE source = $documentId OR source = '${documentId}'`;
+      query += ` ORDER BY createdAt DESC LIMIT ${GRAPH_LIMITS.MAX_EDGES}`; 
       
       const result = await this.db.query(query, { documentId });
       // @ts-ignore
@@ -136,38 +263,24 @@ export class GraphOperations {
     } catch (e) { return []; }
   }
 
-  // --- Helpers ---
   private mapRecordToEntity(r: any): Entity {
-    return { 
-      id: r.id, type: r.type || "Unknown", label: r.label || r.id, 
-      properties: r.properties || r, metadata: r.metadata || {}, 
-      createdAt: r.createdAt, updatedAt: r.updatedAt 
-    };
+    return { id: r.id, type: r.type || "Unknown", label: r.label || r.id, properties: r.properties || r, metadata: r.metadata || {}, createdAt: r.createdAt, updatedAt: r.updatedAt };
   }
 
   private mapRecordToRelationship(r: any): Relationship {
-    return { 
-      id: r.id, from: r.from || r.in, to: r.to || r.out, 
-      type: r.id ? r.id.split(':')[0] : "Edge", 
-      properties: r.properties || {}, confidence: r.confidence, source: r.source, createdAt: r.createdAt 
-    };
+    return { id: r.id, from: r.from || r.in, to: r.to || r.out, type: r.id ? r.id.split(':')[0] : "Edge", properties: r.properties || {}, confidence: r.confidence, source: r.source, createdAt: r.createdAt };
   }
 
   private mapRecordToDocument(r: any): Document { return { id: r.id, filename: r.filename, content: r.content, fileType: r.fileType, uploadedAt: r.uploadedAt, processedAt: r.processedAt, entityCount: r.entityCount, relationshipCount: r.relationshipCount }; }
   
-  async getEntitiesByDocument(id: string) { return (await this.getGraphData()).entities; } 
+  async getAllEntities() { return (await this.getGraphData()).entities; }
+  async getEntitiesByDocument(id: string) { return (await this.getGraphData(id)).entities; } 
   async createDocument(d: any) { const payload = { ...d, createdAt: new Date().toISOString(), processedAt: new Date().toISOString(), entityCount: 0, relationshipCount: 0 }; const r = await this.db.create(TABLES.DOCUMENT, payload); return this.mapRecordToDocument(r[0]); }
   async updateDocument(id: string, u: any) { const r = await this.db.merge(id, u); return this.mapRecordToDocument(r); }
-  async deleteDocument(id: string) { await this.db.delete(id); }
-  async clearAllData() { await this.db.query('DELETE FROM entity; DELETE FROM relationship; DELETE FROM document;'); return { entitiesDeleted:0, relationshipsDeleted:0, documentsDeleted:0 }; }
   async getNeighbors(id: string) { return { entities:[], relationships:[] }; }
   async getSubgraph(ids: string[]) { return { entities:[], relationships:[] }; }
-  async searchEntities(q: string) { return []; }
-  async createRelationship(f, t, type, p={}, c=1, s="man") { return {} as any; }
-  async updateRelationship(id, u) { return {} as any; }
-  async deleteRelationship(id) {}
-  async getEntity(id) { return null; }
-  async getRelationship(id) { return null; }
+  async getEntity(id: string) { return null; }
+  async getRelationship(id: string) { return null; }
   async getAllDocuments() { return []; }
 }
 

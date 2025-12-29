@@ -16,16 +16,31 @@ import EntityForm from "@/components/EntityForm";
 import RelationshipForm from "@/components/RelationshipForm";
 import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
-import { useGraph } from "@/hooks/useGraph";
+import { useGraph } from "@/hooks/useGraph"; // Using the new Secure Hook
 import { useSurrealDB } from "@/hooks/useSurrealDB";
 import { Upload, FileText, Info, Settings } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
 
 export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
-  const { activeTab, setActiveTab, selectedEntity, setSelectedEntity, entities: storeEntities } =
-    useGraphStore();
-  const { entities, relationships, selectedRelationship, loadGraph, createEntity, updateEntity, deleteEntity, createRelationship, updateRelationship, deleteRelationship, getRelationship, selectRelationship } = useGraph();
+  const { activeTab, setActiveTab, setSelectedEntity } = useGraphStore();
+  
+  // Get all data and actions from our new Secure Hook
+  const { 
+    entities, 
+    relationships, 
+    loadGraph, 
+    searchGraph, // <--- The new Search Function
+    createEntity, 
+    updateEntity, 
+    deleteEntity, 
+    createRelationship, 
+    updateRelationship, 
+    deleteRelationship, 
+    getRelationship, 
+    selectRelationship 
+  } = useGraph();
+
   const { isConnected } = useSurrealDB();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
@@ -47,103 +62,77 @@ export default function Home() {
     edgeId?: string;
   } | null>(null);
 
-  // Load graph data on mount - wait for connection first
+  // 1. Initial Load
   useEffect(() => {
-    if (!isConnected) {
-      // Wait for connection before loading
-      return;
-    }
-
-    const loadGraphData = async () => {
+    const init = async () => {
       try {
         await loadGraph(selectedDocumentId);
-        setIsInitialLoad(false);
-      } catch (error: any) {
-        // Handle all errors gracefully - app should still work
-        if (error?.message?.includes("not connected")) {
-          console.warn("Graph loading skipped - waiting for connection");
-        } else if (error?.message?.includes("permissions") || error?.message?.includes("IAM error")) {
-          console.warn("Permission error - app will work with limited functionality");
-        } else {
-          console.error("Failed to load graph:", error);
-        }
+      } catch (e) {
+        console.error("Initialization error:", e);
+      } finally {
         setIsInitialLoad(false);
       }
     };
+    init();
+  }, [loadGraph]);
 
-    if (isInitialLoad) {
-      loadGraphData();
-    }
-  }, [loadGraph, isConnected, isInitialLoad]);
-
-  // Reload graph when document selection changes
+  // 2. Reload when Document Changes
   useEffect(() => {
-    if (isConnected && !isInitialLoad) {
+    if (!isInitialLoad) {
       loadGraph(selectedDocumentId).catch((error) => {
         console.error("Failed to reload graph:", error);
       });
     }
-  }, [selectedDocumentId]); // Only depend on selectedDocumentId
+  }, [selectedDocumentId]);
 
-  // Update graph visualization when data changes
+  // 3. Update Visualization when Data Changes
   useEffect(() => {
-    if (graphRef.current && entities.length > 0 || relationships.length > 0) {
-      // Small delay to ensure Cytoscape is initialized
+    if (graphRef.current) {
+      // Small delay to ensure UI is ready
       const timeoutId = setTimeout(() => {
-        if (graphRef.current) {
-          graphRef.current.loadGraphData(entities, relationships);
-        }
-      }, 200);
-      
+        graphRef.current?.loadGraphData(entities, relationships);
+      }, 100);
       return () => clearTimeout(timeoutId);
-    } else if (graphRef.current) {
-      // Even if empty, try to load (for empty state)
-      graphRef.current.loadGraphData(entities, relationships);
     }
   }, [entities, relationships]);
 
-  // Handle entity form submission
-  const handleEntitySubmit = async (data: Omit<Entity, "id" | "createdAt" | "updatedAt">) => {
+  // --- Handlers ---
+
+  const handleEntitySubmit = async (data: any) => {
     try {
       if (editingEntity) {
-        const updated = await updateEntity(editingEntity.id, data);
-        graphRef.current?.updateNode(updated);
+        await updateEntity(editingEntity.id, data);
         toast.success("Entity updated successfully");
       } else {
-        const created = await createEntity(data);
-        graphRef.current?.addNode(created);
+        await createEntity(data);
         toast.success("Entity created successfully");
       }
       setShowEntityForm(false);
       setEditingEntity(null);
     } catch (error: any) {
       toast.error(error.message || "Failed to save entity");
-      throw error;
     }
   };
 
-  // Handle relationship form submission
   const handleRelationshipSubmit = async (
     from: string,
     to: string,
-    type: Relationship["type"],
-    properties?: Record<string, any>,
+    type: string,
+    properties?: any,
     confidence?: number
   ) => {
     try {
       if (editingRelationship) {
-        const updated = await updateRelationship(editingRelationship.id, {
+        await updateRelationship(editingRelationship.id, {
           from,
           to,
           type,
           properties,
           confidence,
         });
-        graphRef.current?.updateEdge(updated);
         toast.success("Relationship updated successfully");
       } else {
-        const created = await createRelationship(from, to, type, properties, confidence);
-        graphRef.current?.addEdge(created);
+        await createRelationship(from, to, type, properties, confidence);
         toast.success("Relationship created successfully");
       }
       setShowRelationshipForm(false);
@@ -153,11 +142,32 @@ export default function Home() {
       selectRelationship(null);
     } catch (error: any) {
       toast.error(error.message || "Failed to save relationship");
-      throw error;
     }
   };
 
-  // Context menu handlers
+  // --- Search Handler (Connected to API) ---
+  const handleSearch = async (query: string) => {
+    if (!query.trim()) {
+      // If search is cleared, reload original data
+      loadGraph(selectedDocumentId);
+      return;
+    }
+    
+    try {
+      const results = await searchGraph(query);
+      // Update the Store directly with search results
+      useGraphStore.getState().setEntities(results);
+      // Optional: Clear edges to focus on the search results
+      useGraphStore.getState().setRelationships([]);
+      
+      toast.success(`Found ${results.length} matches`);
+    } catch (e) {
+      toast.error("Search failed");
+    }
+  };
+
+  // --- UI Actions ---
+
   const handleContextMenu = (x: number, y: number, target: ContextMenuTarget, nodeId?: string, edgeId?: string) => {
     setContextMenu({ x, y, target, nodeId, edgeId });
   };
@@ -183,13 +193,10 @@ export default function Home() {
     if (entityId) {
       try {
         await deleteEntity(entityId);
-        graphRef.current?.removeNode(entityId);
         toast.success("Entity deleted successfully");
-        if (selectedEntity?.id === entityId) {
-          setSelectedEntity(null);
-        }
+        setSelectedEntity(null);
       } catch (error: any) {
-        toast.error(error.message || "Failed to delete entity");
+        toast.error("Failed to delete entity");
       }
     }
   };
@@ -209,10 +216,9 @@ export default function Home() {
     } else if (relationshipOrId) {
       relationship = relationshipOrId;
     } else {
+      // Try to find from context menu
       const relId = contextMenu?.edgeId;
-      if (relId) {
-        relationship = relationships.find((r) => r.id === relId);
-      }
+      if (relId) relationship = relationships.find((r) => r.id === relId);
     }
     
     if (relationship) {
@@ -228,22 +234,19 @@ export default function Home() {
     if (relId) {
       try {
         await deleteRelationship(relId);
-        graphRef.current?.removeEdge(relId);
         toast.success("Relationship deleted successfully");
       } catch (error: any) {
-        toast.error(error.message || "Failed to delete relationship");
+        toast.error("Failed to delete relationship");
       }
     }
   };
 
-  // Handle node selection
   const handleNodeSelect = (entityId: string) => {
     const entity = entities.find((e) => e.id === entityId);
     if (entity) {
       setSelectedEntity(entity);
-      selectRelationship(null); // Deselect relationship when node is selected
+      selectRelationship(null);
       setActiveTab("details");
-      graphRef.current?.highlightNode(entityId);
     }
   };
 
@@ -251,29 +254,15 @@ export default function Home() {
     setSelectedEntity(null);
   };
 
-  // Handle edge selection
   const handleEdgeSelect = async (edgeId: string) => {
-    try {
-      // Try to get relationship from store first
-      let relationship: Relationship | null | undefined = relationships.find((r) => r.id === edgeId);
-      
-      // If not found, fetch from database
-      if (!relationship) {
-        relationship = await getRelationship(edgeId);
-      }
-      
-      if (relationship) {
-        selectRelationship(relationship);
-        setEditingRelationship(relationship);
-        setRelationshipFromId(relationship.from);
-        setRelationshipToId(relationship.to);
-        setShowRelationshipForm(true);
-        setSelectedEntity(null); // Deselect entity when edge is selected
-        graphRef.current?.highlightEdge(edgeId);
-      }
-    } catch (error: any) {
-      console.error("Error selecting edge:", error);
-      toast.error(error.message || "Failed to select edge");
+    const relationship = relationships.find((r) => r.id === edgeId);
+    if (relationship) {
+      selectRelationship(relationship);
+      setEditingRelationship(relationship);
+      setRelationshipFromId(relationship.from);
+      setRelationshipToId(relationship.to);
+      setShowRelationshipForm(true);
+      setSelectedEntity(null);
     }
   };
 
@@ -298,63 +287,42 @@ export default function Home() {
               <h1 className="text-2xl font-bold text-gray-900">
                 Knowledge Graph POC
               </h1>
+              {/* Status Dot */}
               <div
                 className={`w-3 h-3 rounded-full ${
-                  isConnected ? "bg-green-500" : "bg-red-500"
+                  entities.length > 0 ? "bg-green-500" : "bg-gray-400"
                 }`}
-                title={isConnected ? "Connected" : "Disconnected"}
+                title={entities.length > 0 ? "Data Loaded" : "No Data"}
               />
             </div>
             <div className="flex items-center gap-4">
               <div className="text-sm text-gray-600">
                 {entities.length} entities, {relationships.length} relationships
               </div>
-              {isConnected && entities.length === 0 && relationships.length === 0 && (
-                <button
-                  onClick={() => {
-                    loadGraph(selectedDocumentId).catch((error) => {
-                      console.error("Failed to reload graph:", error);
-                      toast.error("Failed to load graph. Check permissions.");
-                    });
-                  }}
-                  className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
-                  title="Reload graph data"
-                >
-                  Reload
-                </button>
-              )}
             </div>
           </div>
         </header>
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-          {/* Graph Visualization (70%) */}
+          {/* Graph Section */}
           <div className="flex-1 flex flex-col lg:w-[70%] w-full">
             <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end">
               <GraphSelector
                 selectedDocumentId={selectedDocumentId}
                 onSelectDocument={setSelectedDocumentId}
-                onRefresh={() => {
-                  loadGraph(selectedDocumentId).catch((error) => {
-                    console.error("Failed to refresh graph:", error);
-                  });
-                }}
+                onRefresh={() => loadGraph(selectedDocumentId)}
               />
             </div>
-              <GraphControls 
-                graphRef={graphRef}
-                onCreateNode={() => {
-                  setEditingEntity(null);
-                  setShowEntityForm(true);
-                }}
-                onCreateRelationship={() => {
-                  setEditingRelationship(null);
-                  setRelationshipFromId(undefined);
-                  setRelationshipToId(undefined);
-                  setShowRelationshipForm(true);
-                }}
-              />
+            
+            {/* UPDATED: GraphControls with onSearch */}
+            <GraphControls 
+              graphRef={graphRef}
+              onCreateNode={handleCreateNode}
+              onCreateRelationship={handleCreateRelationship}
+              onSearch={handleSearch} 
+            />
+
             <div className="flex-1 relative">
               {isInitialLoad ? (
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -364,69 +332,26 @@ export default function Home() {
                   </div>
                 </div>
               ) : (
-                <>
-                  <GraphVisualization
-                    ref={graphRef}
-                    onNodeSelect={handleNodeSelect}
-                    onNodeDeselect={handleNodeDeselect}
-                    onEdgeSelect={handleEdgeSelect}
-                    onEdgeDeselect={handleEdgeDeselect}
-                    onContextMenu={handleContextMenu}
-                    onCreateNode={(x, y) => {
-                      // Convert canvas coordinates - for now just show form
-                      handleCreateNode();
-                    }}
-                    onCreateRelationship={(fromId, toId) => {
-                      setRelationshipFromId(fromId);
-                      setRelationshipToId(toId);
-                      setEditingRelationship(null);
-                      setShowRelationshipForm(true);
-                    }}
-                  />
-                  {entities.length === 0 && relationships.length === 0 && !isInitialLoad && (
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                      <div className="text-center bg-white/95 px-6 py-4 rounded-lg shadow-lg border border-gray-200 max-w-md">
-                        <p className="text-gray-700 font-medium text-lg mb-2">No graph data available</p>
-                        <p className="text-sm text-gray-500 mb-4">
-                          {isConnected 
-                            ? "The database may be empty or you may not have read permissions. Try uploading a document or creating entities manually."
-                            : "Waiting for database connection..."}
-                        </p>
-                        {isConnected && (
-                          <div className="flex gap-2 justify-center">
-                            <button
-                              onClick={() => {
-                                loadGraph(selectedDocumentId).catch((error) => {
-                                  console.error("Failed to reload:", error);
-                                  toast.error("Failed to load graph data");
-                                });
-                              }}
-                              className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 pointer-events-auto"
-                            >
-                              Reload Graph
-                            </button>
-                            <button
-                              onClick={() => {
-                                setActiveTab("upload");
-                                toast.success("Switch to Upload tab to add data");
-                              }}
-                              className="px-4 py-2 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300 pointer-events-auto"
-                            >
-                              Upload Document
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </>
+                <GraphVisualization
+                  ref={graphRef}
+                  onNodeSelect={handleNodeSelect}
+                  onNodeDeselect={handleNodeDeselect}
+                  onEdgeSelect={handleEdgeSelect}
+                  onEdgeDeselect={handleEdgeDeselect}
+                  onContextMenu={handleContextMenu}
+                  onCreateNode={handleCreateNode}
+                  onCreateRelationship={(f, t) => {
+                    setRelationshipFromId(f);
+                    setRelationshipToId(t);
+                    setShowRelationshipForm(true);
+                  }}
+                />
               )}
             </div>
           </div>
 
-          {/* Control Panel (30%) */}
+          {/* Sidebar Panel */}
           <div className="lg:w-[30%] w-full bg-white border-t lg:border-t-0 lg:border-l border-gray-200 flex flex-col">
-            {/* Tabs */}
             <div className="flex border-b border-gray-200 overflow-x-auto">
               {tabs.map((tab) => {
                 const Icon = tab.icon;
@@ -447,7 +372,6 @@ export default function Home() {
               })}
             </div>
 
-            {/* Tab Content */}
             <div className="flex-1 overflow-y-auto p-4">
               {activeTab === "upload" && <FileUpload />}
               {activeTab === "input" && <TextInput />}
@@ -469,10 +393,7 @@ export default function Home() {
           <EntityForm
             entity={editingEntity || undefined}
             onSubmit={handleEntitySubmit}
-            onCancel={() => {
-              setShowEntityForm(false);
-              setEditingEntity(null);
-            }}
+            onCancel={() => setShowEntityForm(false)}
           />
         )}
 
@@ -483,13 +404,7 @@ export default function Home() {
             relationship={editingRelationship || undefined}
             entities={entities}
             onSubmit={handleRelationshipSubmit}
-            onCancel={() => {
-              setShowRelationshipForm(false);
-              setEditingRelationship(null);
-              setRelationshipFromId(undefined);
-              setRelationshipToId(undefined);
-              selectRelationship(null);
-            }}
+            onCancel={() => setShowRelationshipForm(false)}
           />
         )}
 
@@ -508,31 +423,7 @@ export default function Home() {
           />
         )}
 
-        {/* Toast Notifications */}
-        <Toaster
-          position="top-right"
-          toastOptions={{
-            duration: 4000,
-            style: {
-              background: "#363636",
-              color: "#fff",
-            },
-            success: {
-              duration: 3000,
-              iconTheme: {
-                primary: "#10b981",
-                secondary: "#fff",
-              },
-            },
-            error: {
-              duration: 5000,
-              iconTheme: {
-                primary: "#ef4444",
-                secondary: "#fff",
-              },
-            },
-          }}
-        />
+        <Toaster position="top-right" />
       </div>
     </ErrorBoundary>
   );
