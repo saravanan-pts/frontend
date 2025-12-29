@@ -10,6 +10,6 @@ dist/
 # Documentation
 docs/
 
-.env.local.env.local*
-.env*
-
+# Environment files (IMPORTANT)
+.env
+.env.*
