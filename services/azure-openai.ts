@@ -99,6 +99,7 @@ export class AzureOpenAIService {
       ### ENRICHMENT RULES
       1. **Context:** Add a 'description' property to every entity based on the other columns in the row.
       2. **Events:** If the row represents a log or transaction, treat the main entity as an 'Event'.
+      3. **Completeness:** You MUST explicitly list every entity found in the 'relationships' array in the 'entities' array.
       
       ### INPUT ROW
       ${rowText}

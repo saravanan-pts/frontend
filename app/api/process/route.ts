@@ -21,7 +21,6 @@ export async function POST(request: NextRequest) {
     if (!textContent) return NextResponse.json({ error: "No text content" }, { status: 400 });
 
     // 2. Create Document Record
-    // Note: graphOps.createDocument now handles createdAt automatically
     const document = await graphOps.createDocument({
         filename: fileName || "input.txt",
         content: textContent,
@@ -29,9 +28,17 @@ export async function POST(request: NextRequest) {
     });
 
     // 3. Process Sequentially
-    const lines = textContent.split('\n').filter(line => line.trim().length > 0);
-    if(approvedMapping && lines.length > 0 && lines[0].includes(approvedMapping[0]?.header_column)) {
-        lines.shift(); // Skip Header
+    const lines = textContent.split('\n').filter((line: string) => line.trim().length > 0);
+    
+    // --- PRODUCTION FIX: Smart CSV Handling ---
+    let csvHeaders: string[] = [];
+    if (lines.length > 0 && (!approvedMapping || approvedMapping.length === 0)) {
+        // If no mapping, we assume the first row is a Header.
+        // We will use this to give the AI context for "Smart Extraction".
+        csvHeaders = lines[0].split(',').map((h: string) => h.trim().replace(/"/g, ''));
+        lines.shift(); // Remove header from data rows
+    } else if (approvedMapping && approvedMapping.length > 0 && lines[0].includes(approvedMapping[0]?.header_column)) {
+        lines.shift(); // Skip Header if mapping is provided
     }
 
     const BATCH_SIZE = 100; 
@@ -44,12 +51,53 @@ export async function POST(request: NextRequest) {
     let lastEventId: string | null = null; 
 
     for (const row of rowsToProcess) {
-        const result = await azureOpenAI.extractGraphWithMapping(row, approvedMapping || []);
+        let result;
+
+        // STRATEGY A: Strict Mapping (User defined schema)
+        if (approvedMapping && approvedMapping.length > 0) {
+             result = await azureOpenAI.extractGraphWithMapping(row, approvedMapping);
+        } 
+        // STRATEGY B: Smart Extraction (Infer precise verbs from context)
+        else {
+             // Construct a context-rich string: "ColumnName: Value, ColumnName: Value"
+             // This helps the AI understand the data without forcing generic "RELATED_TO" edges.
+             let contextRow = row;
+             if (csvHeaders.length > 0) {
+                 const values = row.split(',').map((v: string) => v.trim().replace(/"/g, ''));
+                 contextRow = csvHeaders.map((h, i) => `${h}: ${values[i] || ''}`).join(', ');
+             }
+             // Use the advanced extractor which prompts for "Precise Verbs"
+             result = await azureOpenAI.extractEntitiesAndRelationships(contextRow);
+        }
         
+        // SAFEGUARDS
+        result.entities = result.entities || [];
+        result.relationships = result.relationships || [];
+
+        // --- DETERMINISTIC BACKFILL (Fixes "Entities: 0" issue) ---
+        const existingLabels = new Set(result.entities.map(e => e.label));
+        for (const rel of result.relationships) {
+            if (rel.from && !existingLabels.has(rel.from)) {
+                result.entities.push({ 
+                    label: rel.from, 
+                    type: "Concept", 
+                    properties: { source: "inferred", description: `Inferred node from relationship: ${rel.type}` } 
+                });
+                existingLabels.add(rel.from);
+            }
+            if (rel.to && !existingLabels.has(rel.to)) {
+                result.entities.push({ 
+                    label: rel.to, 
+                    type: "Concept", 
+                    properties: { source: "inferred", description: `Inferred node from relationship: ${rel.type}` } 
+                });
+                existingLabels.add(rel.to);
+            }
+        }
+        // -----------------------------------------------------------
+
         let currentEventId: string | null = null;
         const sanitizeId = (label: string) => label ? label.trim().replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() : "unknown";
-        
-        // FIX: Shared timestamp for this batch row
         const now = new Date().toISOString(); 
 
         // A. Insert Entities
@@ -67,32 +115,31 @@ export async function POST(request: NextRequest) {
                     type: entity.type || "Concept",
                     properties: entity.properties || {}, 
                     metadata: { source: document.id },
-                    // FIX: Mandatory fields
                     createdAt: now,
                     updatedAt: now
                 });
+                entitiesInserted++;
             } catch (err) {
                 await db.merge(id, {
                     properties: entity.properties || {},
                     updatedAt: now
                 });
             }
-            entitiesInserted++;
         }
 
-        // B. Insert Relationships (With SELF-HEALING)
+        // B. Insert Relationships
         for (const rel of result.relationships) {
             if(!rel.from || !rel.to) continue;
             const fromId = `entity:${sanitizeId(rel.from)}`;
             const toId = `entity:${sanitizeId(rel.to)}`;
             
-            // Self-Healing with createdAt
+            // Fail-safe creation (though backfill should have handled this)
             try { await db.create(fromId, { label: rel.from, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
             try { await db.create(toId, { label: rel.to, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
 
+            // Ensure we don't have empty types
             const relType = (rel.type || "RELATED_TO").replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
 
-            // Unlock Table & Insert (Adding createdAt)
             try { 
                 await db.query(`DEFINE TABLE ${relType} SCHEMALESS PERMISSIONS FULL`); 
                 await db.query(`
@@ -105,7 +152,7 @@ export async function POST(request: NextRequest) {
             } catch (e) { console.error(e); }
         }
 
-        // C. Insert Timeline Chain (Adding createdAt)
+        // C. Insert Timeline Chain
         if (lastEventId && currentEventId) {
             try {
                 await db.query(`DEFINE TABLE NEXT SCHEMALESS PERMISSIONS FULL`);

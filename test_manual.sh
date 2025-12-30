@@ -4,11 +4,9 @@
 
 # Define the list of files to import
 
-FILES=(
 
-  "/home/ubuntu/example/car_ins_demo.csv"
 
-)
+FILES=(/home/ubuntu/example/car_insurance_demo/*.csv)
 
 
 
