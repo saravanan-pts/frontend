@@ -7,6 +7,8 @@ import GraphVisualization, { type GraphVisualizationRef } from "@/components/Gra
 import GraphControls from "@/components/GraphControls";
 import GraphSelector from "@/components/GraphSelector";
 import NodeDetailPanel from "@/components/NodeDetailPanel";
+import FilterPanel from "@/components/FilterPanel"; 
+import MainSidebar from "@/components/MainSidebar"; // <--- Main Sidebar
 import FileUpload from "@/components/FileUpload";
 import TextInput from "@/components/TextInput";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -42,6 +44,9 @@ export default function Home() {
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   
+  // UI State
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true); 
+
   // Modal states
   const [showEntityForm, setShowEntityForm] = useState(false);
   const [editingEntity, setEditingEntity] = useState<Entity | null>(null);
@@ -51,17 +56,16 @@ export default function Home() {
   const [relationshipToId, setRelationshipToId] = useState<string | undefined>();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget; nodeId?: string; edgeId?: string; } | null>(null);
 
-  // --- CRITICAL FIX: Stabilize Data References ---
-  // We use useMemo to ensure the arrays passed to the graph stay the "same" 
-  // unless the actual data count changes. This prevents the graph from resetting 
-  // when you simply select a node or search.
-  const stableEntities = useMemo(() => {
-    return entities;
-  }, [entities.length]); // Only update if number of entities changes
+  // --- FILTER STATE ---
+  const [allEntityTypes, setAllEntityTypes] = useState<string[]>([]);
+  const [allRelTypes, setAllRelTypes] = useState<string[]>([]);
+  
+  const [selectedEntityFilters, setSelectedEntityFilters] = useState<string[]>([]);
+  const [selectedRelFilters, setSelectedRelFilters] = useState<string[]>([]);
 
-  const stableRelationships = useMemo(() => {
-    return relationships;
-  }, [relationships.length]); // Only update if number of relationships changes
+  // Stabilize Data
+  const stableEntities = useMemo(() => entities, [entities.length]);
+  const stableRelationships = useMemo(() => relationships, [relationships.length]);
 
   // 1. Initial Data Load
   useEffect(() => {
@@ -80,7 +84,38 @@ export default function Home() {
     }
   }, [selectedDocumentId]);
 
-  // --- Handlers ---
+  // 3. Extract Types for Filters
+  useEffect(() => {
+    if (entities.length > 0) {
+        const eTypes = Array.from(new Set(entities.map(e => e.type))).sort();
+        setAllEntityTypes(eTypes);
+        setSelectedEntityFilters(prev => prev.length === 0 ? eTypes : prev);
+    }
+    if (relationships.length > 0) {
+        const rTypes = Array.from(new Set(relationships.map(r => r.type))).sort();
+        setAllRelTypes(rTypes);
+        setSelectedRelFilters(prev => prev.length === 0 ? rTypes : prev);
+    }
+  }, [entities, relationships]);
+
+  // 4. Apply Filters
+  useEffect(() => {
+      if (graphRef.current) {
+          graphRef.current.filterByType(selectedEntityFilters);
+          graphRef.current.filterByRelationship(selectedRelFilters);
+      }
+  }, [selectedEntityFilters, selectedRelFilters]);
+
+  // Filter Handlers
+  const toggleEntityFilter = (type: string) => {
+      setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
+  };
+
+  const toggleRelFilter = (type: string) => {
+      setSelectedRelFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
+  };
+
+  // --- Other Handlers ---
   const handleEntitySubmit = async (data: any) => {
     try {
       if (editingEntity) await updateEntity(editingEntity.id, data);
@@ -104,18 +139,10 @@ export default function Home() {
         if (graphRef.current) graphRef.current.searchAndHighlight("");
         return;
     }
-    
-    // 1. Visual Filter
-    if (graphRef.current) {
-        graphRef.current.searchAndHighlight(query);
-    }
-
-    // 2. Select Node (Side Panel)
+    if (graphRef.current) graphRef.current.searchAndHighlight(query);
     const term = query.toLowerCase();
     const match = entities.find(e => (e.label || "").toLowerCase().includes(term));
-
     if (match) {
-        // Because we used useMemo above, calling this WON'T reset the graph anymore!
         setSelectedEntity(match); 
         setActiveTab("details"); 
         toast.success("Found: " + match.label);
@@ -131,7 +158,6 @@ export default function Home() {
     } catch (e) { toast.error("Failed", { id: toastId }); }
   };
 
-  // Manual Refresh
   const handleForceRefresh = () => {
      if(graphRef.current) graphRef.current.fit();
      loadGraph(selectedDocumentId);
@@ -152,64 +178,100 @@ export default function Home() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-gray-50 flex flex-col">
-        <header className="bg-white border-b border-gray-200 shadow-sm">
-          <div className="px-6 py-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-gray-900">Knowledge Graph POC</h1>
-              <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
-              <div className={`w-3 h-3 rounded-full ${entities.length > 0 ? "bg-green-500" : "bg-gray-400"}`} />
-            </div>
-            <div className="text-sm text-gray-600">{entities.length} entities, {relationships.length} relationships</div>
-          </div>
-        </header>
+      <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row overflow-hidden">
+        
+        {/* 1. MAIN SIDEBAR (Text + Icons) */}
+        <div className="hidden md:block">
+           <MainSidebar />
+        </div>
 
-        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-          <div className="flex-1 flex flex-col lg:w-[70%] w-full">
-            <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end">
-              <GraphSelector selectedDocumentId={selectedDocumentId} onSelectDocument={setSelectedDocumentId} onRefresh={() => loadGraph(selectedDocumentId)} />
-            </div>
-            
-            <GraphControls graphRef={graphRef} onCreateNode={handleCreateNode} onCreateRelationship={handleCreateRelationship} onSearch={handleSearch} onAnalyze={handleAnalyze} />
+        {/* 2. FILTER SIDEBAR (Collapsible) */}
+        {isFilterPanelOpen && (
+           <div className="hidden md:block border-r border-gray-200">
+             <FilterPanel 
+               entityTypes={allEntityTypes}
+               relationshipTypes={allRelTypes}
+               selectedEntities={selectedEntityFilters}
+               selectedRelationships={selectedRelFilters}
+               onToggleEntity={toggleEntityFilter}
+               onToggleRelationship={toggleRelFilter}
+               onClose={() => setIsFilterPanelOpen(false)}
+             />
+           </div>
+        )}
 
-            <div className="flex-1 relative">
-              {isInitialLoad ? (
-                <div className="absolute inset-0 flex items-center justify-center"><p className="text-gray-600">Loading...</p></div>
-              ) : (
-                <GraphVisualization
-                  ref={graphRef}
-                  entities={stableEntities}          // <--- USING STABLE DATA
-                  relationships={stableRelationships} // <--- USING STABLE DATA
-                  onNodeSelect={handleNodeSelect}
-                  onNodeDeselect={handleNodeDeselect}
-                  onContextMenu={handleContextMenu}
-                  onCreateNode={handleCreateNode}
-                  onCreateRelationship={(f, t) => { setRelationshipFromId(f); setRelationshipToId(t); setShowRelationshipForm(true); }}
-                />
-              )}
-            </div>
-          </div>
+        {/* 3. MAIN CONTENT (Graph + Controls + Right Panel) */}
+        <div className="flex-1 flex flex-col h-full overflow-hidden">
+           {/* Header moved inside main content area for this layout style */}
+           <header className="bg-white border-b border-gray-200 shadow-sm z-20 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                 <h2 className="text-xl font-semibold text-gray-800">Knowledge Graph POC</h2>
+                 <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
+                 <div className={`w-3 h-3 rounded-full ${entities.length > 0 ? "bg-green-500" : "bg-gray-400"}`} />
+              </div>
+              <div className="text-sm text-gray-600">{entities.length} entities, {relationships.length} relationships</div>
+           </header>
 
-          <div className="lg:w-[30%] w-full bg-white border-t lg:border-t-0 lg:border-l border-gray-200 flex flex-col">
-            <div className="flex border-b border-gray-200 overflow-x-auto">
-              {tabs.map((tab) => {
-                const Icon = tab.icon;
-                return (
-                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 min-w-[80px] flex items-center justify-center gap-1 py-3 text-xs lg:text-sm font-medium ${activeTab === tab.id ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-600"}`}>
-                    <Icon className="w-4 h-4" /> <span>{tab.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex-1 overflow-y-auto p-4">
-              {activeTab === "upload" && <FileUpload />}
-              {activeTab === "input" && <TextInput />}
-              {activeTab === "details" && <NodeDetailPanel onClose={() => setSelectedEntity(null)} onCreateRelationship={handleCreateRelationship} onEditRelationship={()=>{}} onDeleteRelationship={()=>{}} />}
-              {activeTab === "settings" && <SettingsPanel />}
-            </div>
-          </div>
+           <div className="flex-1 flex flex-row overflow-hidden bg-gray-50">
+             {/* GRAPH AREA */}
+             <div className="flex-1 flex flex-col min-w-0">
+               <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end">
+                 <GraphSelector selectedDocumentId={selectedDocumentId} onSelectDocument={setSelectedDocumentId} onRefresh={() => loadGraph(selectedDocumentId)} />
+               </div>
+               
+               <GraphControls 
+                 graphRef={graphRef} 
+                 onCreateNode={handleCreateNode} 
+                 onCreateRelationship={handleCreateRelationship} 
+                 onSearch={handleSearch} 
+                 onAnalyze={handleAnalyze} 
+                 isFilterPanelOpen={isFilterPanelOpen}
+                 onToggleFilterPanel={() => setIsFilterPanelOpen(true)}
+               />
+  
+               <div className="flex-1 relative p-4">
+                 {isInitialLoad ? (
+                   <div className="absolute inset-0 flex items-center justify-center"><p className="text-gray-600">Loading...</p></div>
+                 ) : (
+                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full overflow-hidden">
+                       <GraphVisualization
+                       ref={graphRef}
+                       entities={stableEntities}
+                       relationships={stableRelationships}
+                       onNodeSelect={handleNodeSelect}
+                       onNodeDeselect={handleNodeDeselect}
+                       onContextMenu={handleContextMenu}
+                       onCreateNode={handleCreateNode}
+                       onCreateRelationship={(f, t) => { setRelationshipFromId(f); setRelationshipToId(t); setShowRelationshipForm(true); }}
+                       />
+                   </div>
+                 )}
+               </div>
+             </div>
+
+             {/* RIGHT PANEL */}
+             <div className="w-80 lg:w-96 bg-white border-l border-gray-200 flex flex-col z-10">
+               <div className="flex border-b border-gray-200 overflow-x-auto">
+                 {tabs.map((tab) => {
+                   const Icon = tab.icon;
+                   return (
+                     <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 min-w-[60px] flex items-center justify-center gap-1 py-3 text-xs lg:text-sm font-medium ${activeTab === tab.id ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-600 hover:bg-gray-50"}`}>
+                       <Icon className="w-4 h-4" /> <span className="hidden sm:inline">{tab.label}</span>
+                     </button>
+                   );
+                 })}
+               </div>
+               <div className="flex-1 overflow-y-auto p-4">
+                 {activeTab === "upload" && <FileUpload />}
+                 {activeTab === "input" && <TextInput />}
+                 {activeTab === "details" && <NodeDetailPanel onClose={() => setSelectedEntity(null)} onCreateRelationship={handleCreateRelationship} onEditRelationship={()=>{}} onDeleteRelationship={()=>{}} />}
+                 {activeTab === "settings" && <SettingsPanel />}
+               </div>
+             </div>
+           </div>
         </div>
         
+        {/* Modals */}
         {showEntityForm && <EntityForm entity={editingEntity || undefined} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
         {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={entities} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
         {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} target={contextMenu.target} onCreateNode={handleCreateNode} onEditNode={()=>{}} onDeleteNode={()=>{}} onCreateRelationship={()=>{}} onEditEdge={()=>{}} onDeleteEdge={()=>{}} onClose={() => setContextMenu(null)} />}

@@ -14,7 +14,6 @@ if (typeof window !== "undefined") {
 }
 
 export interface GraphVisualizationRef {
-  // We keep these for actions like Zoom/Search
   addNode: (entity: Entity) => void;
   addEdge: (relationship: Relationship) => void;
   updateNode: (entity: Entity) => void;
@@ -24,19 +23,19 @@ export interface GraphVisualizationRef {
   highlightNode: (id: string) => void;
   highlightEdge: (id: string) => void;
   filterByType: (types: string[]) => void;
+  filterByRelationship: (types: string[]) => void;
   exportGraph: (format: "png" | "json") => void;
   fit: () => void;
   resetZoom: () => void;
   zoomIn: () => void;
   zoomOut: () => void;
   searchAndHighlight: (query: string) => void;
-  // Fallback if needed
   loadGraphData: (entities: Entity[], relationships: Relationship[]) => void;
 }
 
 interface GraphVisualizationProps {
-  entities: Entity[];          // <--- DATA PASSED AS PROPS
-  relationships: Relationship[]; // <--- DATA PASSED AS PROPS
+  entities: Entity[];          
+  relationships: Relationship[]; 
   onNodeSelect?: (entityId: string) => void;
   onNodeDeselect?: () => void;
   onEdgeSelect?: (edgeId: string) => void;
@@ -50,12 +49,10 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
   ({ entities, relationships, onNodeSelect, onNodeDeselect, onEdgeSelect, onEdgeDeselect, onContextMenu }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<Core | null>(null);
-    const isMounted = useRef(false);
 
     // 1. Initialize Cytoscape
     useEffect(() => {
       if (!containerRef.current) return;
-      isMounted.current = true;
 
       const entityColors: Record<string, string> = {
           Person: "#3b82f6", Organization: "#10b981", Location: "#f59e0b",
@@ -103,8 +100,24 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                   "label": "data(type)", "font-size": "8px", "text-rotation": "autorotate"
                 }
               },
-              { selector: ".hidden", style: { "opacity": 0.05, "events": "no" } },
-              { selector: ".highlighted", style: { "border-width": 4, "border-color": "#FBBF24", "width": 40, "height": 40, "z-index": 999 } }
+              // --- CRITICAL FIX: Use display: none ---
+              // This ensures edges connected to hidden nodes are AUTOMATICALLY hidden
+              { 
+                selector: ".hidden", 
+                style: { 
+                  "display": "none" 
+                } 
+              },
+              { 
+                selector: ".highlighted", 
+                style: { 
+                  "border-width": 4, 
+                  "border-color": "#FBBF24", 
+                  "width": 40, 
+                  "height": 40, 
+                  "z-index": 999 
+                } 
+              }
           ],
           layout: { name: "fcose" } as any,
           minZoom: 0.1, maxZoom: 3,
@@ -123,20 +136,18 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
       } catch (error) { console.error("Cytoscape Init Error:", error); }
 
       return () => {
-          isMounted.current = false;
           if (cyRef.current) cyRef.current.destroy();
       };
     }, []);
 
-    // 2. Handle Data Updates (Reactive Prop)
+    // 2. Handle Data Updates
     useEffect(() => {
         if (!cyRef.current || entities.length === 0) return;
         
         const cy = cyRef.current;
-        console.log("GraphVisualization: Updating Data...", entities.length, "nodes");
-
+        
         cy.batch(() => {
-            cy.elements().remove(); // Clear old
+            cy.elements().remove(); 
 
             const parentMap = new Map<string, string>(); 
             const communityIds = new Set(entities.filter(e => e.type === "Community").map(e => e.id));
@@ -170,34 +181,71 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             cy.add([...nodes, ...edges] as any);
         });
 
-        // Run Layout
         cy.layout({ 
             name: 'fcose', animate: true, animationDuration: 500,
             nodeRepulsion: 5000, idealEdgeLength: 60, padding: 20
         } as any).run();
 
-    }, [entities, relationships]); // <--- Reruns whenever data props change
+    }, [entities, relationships]);
 
-    // 3. Expose Methods for Zoom/Search
+    // 3. Expose Methods
     useImperativeHandle(ref, () => ({
       addNode: () => {}, addEdge: () => {}, updateNode: () => {}, updateEdge: () => {},
       removeNode: () => {}, removeEdge: () => {}, highlightNode: () => {}, highlightEdge: () => {},
-      filterByType: () => {}, exportGraph: () => {}, 
       
-      // Fallback manual loader (optional now)
-      loadGraphData: (ents, rels) => { /* Already handled by props, but keeping for compatibility */ },
+      // Filter Nodes (Hides connected edges automatically via display: none)
+      filterByType: (visibleTypes: string[]) => {
+        if (!cyRef.current) return;
+        const cy = cyRef.current;
+        cy.batch(() => {
+          cy.nodes().removeClass("hidden");
+          if (visibleTypes.length > 0) {
+             const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
+             cy.nodes(selector).addClass("hidden");
+          }
+        });
+      },
+
+      // Filter Relationships
+      filterByRelationship: (visibleTypes: string[]) => {
+        if (!cyRef.current) return;
+        const cy = cyRef.current;
+        cy.batch(() => {
+           cy.edges().removeClass("hidden");
+           if (visibleTypes.length > 0) {
+              const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
+              cy.edges(selector).addClass('hidden');
+           }
+        });
+      },
+
+      exportGraph: (format) => { 
+        if(format === 'json') {
+            const blob = new Blob([JSON.stringify(cyRef.current?.json())], {type: "application/json"});
+            const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='graph.json'; a.click();
+        } else {
+            const png = cyRef.current?.png({ full: true });
+            if(png) { const a = document.createElement('a'); a.href=png; a.download='graph.png'; a.click(); }
+        }
+      },
+      
+      loadGraphData: (ents, rels) => { },
 
       fit: () => cyRef.current?.fit(),
+      
       resetZoom: () => {
           cyRef.current?.elements().removeClass("hidden").removeClass("highlighted");
           cyRef.current?.fit();
       },
+      
       zoomIn: () => {
         cyRef.current?.zoom({ level: (cyRef.current.zoom() || 1) * 1.2, position: { x: cyRef.current.width() / 2, y: cyRef.current.height() / 2 } });
       },
+      
       zoomOut: () => {
         cyRef.current?.zoom({ level: (cyRef.current.zoom() || 1) / 1.2, position: { x: cyRef.current.width() / 2, y: cyRef.current.height() / 2 } });
       },
+      
       searchAndHighlight: (query: string) => {
         if (!cyRef.current) return;
         const cy = cyRef.current;
