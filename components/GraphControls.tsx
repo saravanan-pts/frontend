@@ -1,23 +1,17 @@
 "use client";
 
 import { useState } from "react";
-// Added Sparkles icon for AI feature
-import { ZoomIn, ZoomOut, Maximize2, Search, Download, X, Plus, Link2, Sparkles } from "lucide-react";
+import { ZoomIn, ZoomOut, Maximize2, Search, Download, Plus, Link2, Sparkles, X } from "lucide-react";
 import type { EntityType } from "@/types";
 import { ENTITY_TYPES } from "@/lib/schema";
 import { useGraphStore } from "@/lib/store";
 
 interface GraphControlsProps {
-  graphRef: React.RefObject<{
-    fit: () => void;
-    resetZoom: () => void;
-    exportGraph: (format: "png" | "json") => void;
-    filterByType: (types: string[]) => void;
-  }>;
+  graphRef: React.RefObject<any>;
   onCreateNode?: () => void;
   onCreateRelationship?: () => void;
   onSearch: (query: string) => void;
-  onAnalyze?: () => void; // <--- New Prop
+  onAnalyze?: () => void;
 }
 
 export default function GraphControls({ 
@@ -32,7 +26,21 @@ export default function GraphControls({
   const [showFilters, setShowFilters] = useState(false);
 
   const handleFit = () => { graphRef.current?.fit(); };
-  const handleResetZoom = () => { graphRef.current?.resetZoom(); };
+  
+  // Update: Clear both the state text AND the visual search
+  const handleClearSearch = () => {
+    setSearchQuery("");
+    onSearch(""); // This resets the graph visualization
+  };
+
+  const handleResetZoom = () => { 
+      handleClearSearch(); // Clear search on reset
+      graphRef.current?.resetZoom(); 
+  };
+  
+  const handleZoomIn = () => { graphRef.current?.zoomIn(); };
+  const handleZoomOut = () => { graphRef.current?.zoomOut(); };
+  
   const handleExportPNG = () => { graphRef.current?.exportGraph("png"); };
   const handleExportJSON = () => { graphRef.current?.exportGraph("json"); };
 
@@ -49,15 +57,20 @@ export default function GraphControls({
     graphRef.current?.filterByType([]);
   };
 
+  const handleTriggerSearch = () => {
+      onSearch(searchQuery);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
-      onSearch(searchQuery);
+      handleTriggerSearch();
     }
   };
 
   return (
     <div className="bg-white border-b border-gray-200 p-2 lg:p-4 shadow-sm">
       <div className="flex flex-wrap items-center gap-2 lg:gap-4">
+        
         {/* Creation Buttons */}
         {(onCreateNode || onCreateRelationship) && (
           <div className="flex items-center gap-1 lg:gap-2 border-r border-gray-200 pr-2 lg:pr-4">
@@ -75,27 +88,52 @@ export default function GraphControls({
         )}
         
         {/* Zoom Controls */}
-        <div className="flex items-center gap-1 lg:gap-2 border-r border-gray-200 pr-2 lg:pr-4">
-          <button onClick={handleFit} className="p-2 hover:bg-gray-100 rounded" title="Fit"><Maximize2 className="w-4 h-4" /></button>
-          <button onClick={handleResetZoom} className="p-2 hover:bg-gray-100 rounded text-sm" title="Reset">1:1</button>
+        <div className="flex items-center gap-1 border-r border-gray-200 pr-2 lg:pr-4">
+          <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded" title="Zoom In">
+            <ZoomIn className="w-4 h-4" />
+          </button>
+          <button onClick={handleZoomOut} className="p-2 hover:bg-gray-100 rounded" title="Zoom Out">
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          <button onClick={handleFit} className="p-2 hover:bg-gray-100 rounded" title="Fit to Screen">
+            <Maximize2 className="w-4 h-4" />
+          </button>
+          <button onClick={handleResetZoom} className="px-2 py-1 hover:bg-gray-100 rounded text-xs font-bold" title="Reset Layout & Search">
+            Reset
+          </button>
         </div>
 
-        {/* SEARCH BAR */}
+        {/* SEARCH BAR (UPDATED with 'X' Icon) */}
         <div className="flex-1 min-w-[120px] lg:min-w-[200px]">
           <div className="relative">
-            <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            {/* Left Search Icon */}
+            <Search 
+                className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400 cursor-pointer hover:text-gray-600" 
+                onClick={handleTriggerSearch}
+            />
+            
             <input
               type="text"
-              placeholder="Search (Press Enter)..."
+              placeholder="Search Node..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={handleKeyDown}
-              className="w-full pl-8 pr-4 py-1 lg:py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full pl-8 pr-8 py-1 lg:py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+
+            {/* Right Clear 'X' Icon - Only shows when there is text */}
+            {searchQuery && (
+              <button 
+                onClick={handleClearSearch}
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 p-1 rounded-full hover:bg-gray-100"
+              >
+                <X className="w-3 h-3 text-gray-400" />
+              </button>
+            )}
           </div>
         </div>
 
-        {/* --- NEW: ANALYZE BUTTON --- */}
+        {/* Analyze Button */}
         {onAnalyze && (
             <button 
                 onClick={onAnalyze}
@@ -103,7 +141,7 @@ export default function GraphControls({
                 title="Detect Communities & Themes (AI)"
             >
                 <Sparkles className="w-4 h-4" /> 
-                <span className="hidden sm:inline">Analyze Graph</span>
+                <span className="hidden sm:inline">Analyze</span>
             </button>
         )}
 
@@ -132,7 +170,7 @@ export default function GraphControls({
         
         {/* Export */}
         <div className="flex items-center gap-1 lg:gap-2 border-l border-gray-200 pl-2 lg:pl-4">
-          <button onClick={handleExportPNG} className="p-2 hover:bg-gray-100 rounded"><Download className="w-4 h-4" /></button>
+          <button onClick={handleExportPNG} className="p-2 hover:bg-gray-100 rounded" title="Download PNG"><Download className="w-4 h-4" /></button>
           <button onClick={handleExportJSON} className="px-3 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">JSON</button>
         </div>
       </div>

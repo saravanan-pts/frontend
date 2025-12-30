@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import GraphVisualization, { type GraphVisualizationRef } from "@/components/GraphVisualization";
@@ -14,22 +14,21 @@ import EntityForm from "@/components/EntityForm";
 import RelationshipForm from "@/components/RelationshipForm";
 import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
-import { useGraph } from "@/hooks/useGraph"; 
+import { useGraph } from "@/hooks/useGraph";
 import { useSurrealDB } from "@/hooks/useSurrealDB";
-import { Upload, FileText, Info, Settings } from "lucide-react";
+import { Upload, FileText, Info, Settings, RefreshCw } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
 
 export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
   const { activeTab, setActiveTab, setSelectedEntity } = useGraphStore();
   
-  // Get all data and actions including analyzeGraph
   const { 
     entities, 
     relationships, 
     loadGraph, 
-    searchGraph, 
-    analyzeGraph, // <--- NEW IMPORT
+    searchGraph,
+    analyzeGraph, 
     createEntity, 
     updateEntity, 
     deleteEntity, 
@@ -50,26 +49,26 @@ export default function Home() {
   const [editingRelationship, setEditingRelationship] = useState<Relationship | null>(null);
   const [relationshipFromId, setRelationshipFromId] = useState<string | undefined>();
   const [relationshipToId, setRelationshipToId] = useState<string | undefined>();
-  
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    target: ContextMenuTarget;
-    nodeId?: string;
-    edgeId?: string;
-  } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget; nodeId?: string; edgeId?: string; } | null>(null);
 
-  // 1. Initial Load
+  // --- CRITICAL FIX: Stabilize Data References ---
+  // We use useMemo to ensure the arrays passed to the graph stay the "same" 
+  // unless the actual data count changes. This prevents the graph from resetting 
+  // when you simply select a node or search.
+  const stableEntities = useMemo(() => {
+    return entities;
+  }, [entities.length]); // Only update if number of entities changes
+
+  const stableRelationships = useMemo(() => {
+    return relationships;
+  }, [relationships.length]); // Only update if number of relationships changes
+
+  // 1. Initial Data Load
   useEffect(() => {
     const init = async () => {
-      try {
-        await loadGraph(selectedDocumentId);
-      } catch (e) {
-        console.error("Initialization error:", e);
-      } finally {
-        setIsInitialLoad(false);
-      }
+      try { await loadGraph(selectedDocumentId); } 
+      catch (e) { console.error("Initialization error:", e); } 
+      finally { setIsInitialLoad(false); }
     };
     init();
   }, [loadGraph]);
@@ -77,195 +76,72 @@ export default function Home() {
   // 2. Reload when Document Changes
   useEffect(() => {
     if (!isInitialLoad) {
-      loadGraph(selectedDocumentId).catch((error) => {
-        console.error("Failed to reload graph:", error);
-      });
+      loadGraph(selectedDocumentId).catch((error) => console.error("Failed to reload graph:", error));
     }
   }, [selectedDocumentId]);
 
-  // 3. Update Visualization when Data Changes
-  useEffect(() => {
-    if (graphRef.current) {
-      const timeoutId = setTimeout(() => {
-        graphRef.current?.loadGraphData(entities, relationships);
-      }, 100);
-      return () => clearTimeout(timeoutId);
-    }
-  }, [entities, relationships]);
-
   // --- Handlers ---
-
   const handleEntitySubmit = async (data: any) => {
     try {
-      if (editingEntity) {
-        await updateEntity(editingEntity.id, data);
-        toast.success("Entity updated successfully");
-      } else {
-        await createEntity(data);
-        toast.success("Entity created successfully");
-      }
-      setShowEntityForm(false);
-      setEditingEntity(null);
-    } catch (error: any) {
-      toast.error(error.message || "Failed to save entity");
-    }
+      if (editingEntity) await updateEntity(editingEntity.id, data);
+      else await createEntity(data);
+      toast.success("Entity saved");
+      setShowEntityForm(false); setEditingEntity(null);
+    } catch (error: any) { toast.error("Failed to save entity"); }
   };
 
   const handleRelationshipSubmit = async (from: string, to: string, type: string, properties?: any, confidence?: number) => {
     try {
-      if (editingRelationship) {
-        await updateRelationship(editingRelationship.id, { from, to, type, properties, confidence });
-        toast.success("Relationship updated successfully");
-      } else {
-        await createRelationship(from, to, type, properties, confidence);
-        toast.success("Relationship created successfully");
-      }
-      setShowRelationshipForm(false);
-      setEditingRelationship(null);
-      setRelationshipFromId(undefined);
-      setRelationshipToId(undefined);
-      selectRelationship(null);
-    } catch (error: any) {
-      toast.error(error.message || "Failed to save relationship");
-    }
+      if (editingRelationship) await updateRelationship(editingRelationship.id, { from, to, type, properties, confidence });
+      else await createRelationship(from, to, type, properties, confidence);
+      toast.success("Relationship saved");
+      setShowRelationshipForm(false); setEditingRelationship(null);
+    } catch (error: any) { toast.error("Failed to save relationship"); }
   };
 
   const handleSearch = async (query: string) => {
     if (!query.trim()) {
-      loadGraph(selectedDocumentId);
-      return;
+        if (graphRef.current) graphRef.current.searchAndHighlight("");
+        return;
     }
     
-    try {
-      const result = await searchGraph(query);
-      const newEntities = result.entities || [];
-      const newRelationships = result.relationships || [];
+    // 1. Visual Filter
+    if (graphRef.current) {
+        graphRef.current.searchAndHighlight(query);
+    }
 
-      useGraphStore.getState().setEntities(newEntities);
-      useGraphStore.getState().setRelationships(newRelationships);
-      
-      toast.success(`Found ${newEntities.length} matches`);
-    } catch (e) {
-      console.error("Search Error:", e);
-      toast.error("Search failed");
+    // 2. Select Node (Side Panel)
+    const term = query.toLowerCase();
+    const match = entities.find(e => (e.label || "").toLowerCase().includes(term));
+
+    if (match) {
+        // Because we used useMemo above, calling this WON'T reset the graph anymore!
+        setSelectedEntity(match); 
+        setActiveTab("details"); 
+        toast.success("Found: " + match.label);
     }
   };
 
-  // --- NEW: ANALYZE HANDLER ---
   const handleAnalyze = async () => {
-    const toastId = toast.loading("Analyzing Graph & Detecting Communities...");
+    const toastId = toast.loading("Analyzing Graph...");
     try {
         await analyzeGraph();
-        toast.success("Analysis Complete! Loading new insights...", { id: toastId });
-        await loadGraph(selectedDocumentId); // Reload to see the new 'Community' nodes
-    } catch (e) {
-        toast.error("Analysis Failed", { id: toastId });
-        console.error(e);
-    }
+        toast.success("Done!", { id: toastId });
+        await loadGraph(selectedDocumentId);
+    } catch (e) { toast.error("Failed", { id: toastId }); }
   };
 
-  // --- UI Actions ---
-
-  const handleContextMenu = (x: number, y: number, target: ContextMenuTarget, nodeId?: string, edgeId?: string) => {
-    setContextMenu({ x, y, target, nodeId, edgeId });
+  // Manual Refresh
+  const handleForceRefresh = () => {
+     if(graphRef.current) graphRef.current.fit();
+     loadGraph(selectedDocumentId);
   };
 
-  const handleCreateNode = () => {
-    setEditingEntity(null);
-    setShowEntityForm(true);
-  };
-
-  const handleEditNode = (nodeId?: string) => {
-    const entityId = nodeId || contextMenu?.nodeId;
-    if (entityId) {
-      const entity = entities.find((e) => e.id === entityId);
-      if (entity) {
-        setEditingEntity(entity);
-        setShowEntityForm(true);
-      }
-    }
-  };
-
-  const handleDeleteNode = async (nodeId?: string) => {
-    const entityId = nodeId || contextMenu?.nodeId;
-    if (entityId) {
-      try {
-        await deleteEntity(entityId);
-        toast.success("Entity deleted successfully");
-        setSelectedEntity(null);
-      } catch (error: any) {
-        toast.error("Failed to delete entity");
-      }
-    }
-  };
-
-  const handleCreateRelationship = (fromEntityId?: string) => {
-    setEditingRelationship(null);
-    setRelationshipFromId(fromEntityId || contextMenu?.nodeId);
-    setRelationshipToId(undefined);
-    setShowRelationshipForm(true);
-  };
-
-  const handleEditEdge = (relationshipOrId?: Relationship | string) => {
-    let relationship: Relationship | undefined;
-    
-    if (typeof relationshipOrId === 'string') {
-      relationship = relationships.find((r) => r.id === relationshipOrId);
-    } else if (relationshipOrId) {
-      relationship = relationshipOrId;
-    } else {
-      const relId = contextMenu?.edgeId;
-      if (relId) relationship = relationships.find((r) => r.id === relId);
-    }
-    
-    if (relationship) {
-      setEditingRelationship(relationship);
-      setRelationshipFromId(relationship.from);
-      setRelationshipToId(relationship.to);
-      setShowRelationshipForm(true);
-    }
-  };
-
-  const handleDeleteEdge = async (edgeId?: string) => {
-    const relId = edgeId || contextMenu?.edgeId;
-    if (relId) {
-      try {
-        await deleteRelationship(relId);
-        toast.success("Relationship deleted successfully");
-      } catch (error: any) {
-        toast.error("Failed to delete relationship");
-      }
-    }
-  };
-
-  const handleNodeSelect = (entityId: string) => {
-    const entity = entities.find((e) => e.id === entityId);
-    if (entity) {
-      setSelectedEntity(entity);
-      selectRelationship(null);
-      setActiveTab("details");
-    }
-  };
-
-  const handleNodeDeselect = () => {
-    setSelectedEntity(null);
-  };
-
-  const handleEdgeSelect = async (edgeId: string) => {
-    const relationship = relationships.find((r) => r.id === edgeId);
-    if (relationship) {
-      selectRelationship(relationship);
-      setEditingRelationship(relationship);
-      setRelationshipFromId(relationship.from);
-      setRelationshipToId(relationship.to);
-      setShowRelationshipForm(true);
-      setSelectedEntity(null);
-    }
-  };
-
-  const handleEdgeDeselect = () => {
-    selectRelationship(null);
-  };
+  const handleContextMenu = (x: number, y: number, target: ContextMenuTarget, nodeId?: string, edgeId?: string) => setContextMenu({ x, y, target, nodeId, edgeId });
+  const handleCreateNode = () => { setEditingEntity(null); setShowEntityForm(true); };
+  const handleCreateRelationship = (fromEntityId?: string) => { setEditingRelationship(null); setRelationshipFromId(fromEntityId || contextMenu?.nodeId); setRelationshipToId(undefined); setShowRelationshipForm(true); };
+  const handleNodeSelect = (id: string) => { const e = entities.find(x => x.id === id); if(e) { setSelectedEntity(e); setActiveTab("details"); } };
+  const handleNodeDeselect = () => setSelectedEntity(null);
 
   const tabs = [
     { id: "upload" as const, label: "Upload", icon: Upload },
@@ -277,148 +153,66 @@ export default function Home() {
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-50 flex flex-col">
-        {/* Header */}
         <header className="bg-white border-b border-gray-200 shadow-sm">
           <div className="px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-gray-900">
-                Knowledge Graph POC
-              </h1>
-              <div
-                className={`w-3 h-3 rounded-full ${
-                  entities.length > 0 ? "bg-green-500" : "bg-gray-400"
-                }`}
-                title={entities.length > 0 ? "Data Loaded" : "No Data"}
-              />
+              <h1 className="text-2xl font-bold text-gray-900">Knowledge Graph POC</h1>
+              <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
+              <div className={`w-3 h-3 rounded-full ${entities.length > 0 ? "bg-green-500" : "bg-gray-400"}`} />
             </div>
-            <div className="flex items-center gap-4">
-              <div className="text-sm text-gray-600">
-                {entities.length} entities, {relationships.length} relationships
-              </div>
-            </div>
+            <div className="text-sm text-gray-600">{entities.length} entities, {relationships.length} relationships</div>
           </div>
         </header>
 
-        {/* Main Content */}
         <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-          {/* Graph Section */}
           <div className="flex-1 flex flex-col lg:w-[70%] w-full">
             <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end">
-              <GraphSelector
-                selectedDocumentId={selectedDocumentId}
-                onSelectDocument={setSelectedDocumentId}
-                onRefresh={() => loadGraph(selectedDocumentId)}
-              />
+              <GraphSelector selectedDocumentId={selectedDocumentId} onSelectDocument={setSelectedDocumentId} onRefresh={() => loadGraph(selectedDocumentId)} />
             </div>
             
-            <GraphControls 
-              graphRef={graphRef}
-              onCreateNode={handleCreateNode}
-              onCreateRelationship={handleCreateRelationship}
-              onSearch={handleSearch}
-              onAnalyze={handleAnalyze} // <--- Pass the new handler
-            />
+            <GraphControls graphRef={graphRef} onCreateNode={handleCreateNode} onCreateRelationship={handleCreateRelationship} onSearch={handleSearch} onAnalyze={handleAnalyze} />
 
             <div className="flex-1 relative">
               {isInitialLoad ? (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="text-center">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4" />
-                    <p className="text-gray-600">Loading graph...</p>
-                  </div>
-                </div>
+                <div className="absolute inset-0 flex items-center justify-center"><p className="text-gray-600">Loading...</p></div>
               ) : (
                 <GraphVisualization
                   ref={graphRef}
+                  entities={stableEntities}          // <--- USING STABLE DATA
+                  relationships={stableRelationships} // <--- USING STABLE DATA
                   onNodeSelect={handleNodeSelect}
                   onNodeDeselect={handleNodeDeselect}
-                  onEdgeSelect={handleEdgeSelect}
-                  onEdgeDeselect={handleEdgeDeselect}
                   onContextMenu={handleContextMenu}
                   onCreateNode={handleCreateNode}
-                  onCreateRelationship={(f, t) => {
-                    setRelationshipFromId(f);
-                    setRelationshipToId(t);
-                    setShowRelationshipForm(true);
-                  }}
+                  onCreateRelationship={(f, t) => { setRelationshipFromId(f); setRelationshipToId(t); setShowRelationshipForm(true); }}
                 />
               )}
             </div>
           </div>
 
-          {/* Sidebar Panel */}
           <div className="lg:w-[30%] w-full bg-white border-t lg:border-t-0 lg:border-l border-gray-200 flex flex-col">
             <div className="flex border-b border-gray-200 overflow-x-auto">
               {tabs.map((tab) => {
                 const Icon = tab.icon;
                 return (
-                  <button
-                    key={tab.id}
-                    onClick={() => setActiveTab(tab.id)}
-                    className={`flex-1 min-w-[80px] flex items-center justify-center gap-1 lg:gap-2 px-2 lg:px-4 py-3 text-xs lg:text-sm font-medium transition-colors ${
-                      activeTab === tab.id
-                        ? "bg-blue-50 text-blue-600 border-b-2 border-blue-600"
-                        : "text-gray-600 hover:bg-gray-50"
-                    }`}
-                  >
-                    <Icon className="w-4 h-4" />
-                    <span className="hidden sm:inline">{tab.label}</span>
+                  <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 min-w-[80px] flex items-center justify-center gap-1 py-3 text-xs lg:text-sm font-medium ${activeTab === tab.id ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-600"}`}>
+                    <Icon className="w-4 h-4" /> <span>{tab.label}</span>
                   </button>
                 );
               })}
             </div>
-
             <div className="flex-1 overflow-y-auto p-4">
               {activeTab === "upload" && <FileUpload />}
               {activeTab === "input" && <TextInput />}
-              {activeTab === "details" && (
-                <NodeDetailPanel 
-                  onClose={() => setSelectedEntity(null)}
-                  onCreateRelationship={handleCreateRelationship}
-                  onEditRelationship={handleEditEdge}
-                  onDeleteRelationship={handleDeleteEdge}
-                />
-              )}
+              {activeTab === "details" && <NodeDetailPanel onClose={() => setSelectedEntity(null)} onCreateRelationship={handleCreateRelationship} onEditRelationship={()=>{}} onDeleteRelationship={()=>{}} />}
               {activeTab === "settings" && <SettingsPanel />}
             </div>
           </div>
         </div>
-
-        {/* Modals */}
-        {showEntityForm && (
-          <EntityForm
-            entity={editingEntity || undefined}
-            onSubmit={handleEntitySubmit}
-            onCancel={() => setShowEntityForm(false)}
-          />
-        )}
-
-        {showRelationshipForm && (
-          <RelationshipForm
-            fromEntityId={relationshipFromId}
-            toEntityId={relationshipToId}
-            relationship={editingRelationship || undefined}
-            entities={entities}
-            onSubmit={handleRelationshipSubmit}
-            onCancel={() => setShowRelationshipForm(false)}
-          />
-        )}
-
-        {contextMenu && (
-          <ContextMenu
-            x={contextMenu.x}
-            y={contextMenu.y}
-            target={contextMenu.target}
-            onCreateNode={handleCreateNode}
-            onEditNode={() => handleEditNode()}
-            onDeleteNode={() => handleDeleteNode()}
-            onCreateRelationship={() => handleCreateRelationship()}
-            onEditEdge={() => handleEditEdge()}
-            onDeleteEdge={() => handleDeleteEdge()}
-            onClose={() => setContextMenu(null)}
-          />
-        )}
-
+        
+        {showEntityForm && <EntityForm entity={editingEntity || undefined} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
+        {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={entities} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
+        {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} target={contextMenu.target} onCreateNode={handleCreateNode} onEditNode={()=>{}} onDeleteNode={()=>{}} onCreateRelationship={()=>{}} onEditEdge={()=>{}} onDeleteEdge={()=>{}} onClose={() => setContextMenu(null)} />}
         <Toaster position="top-right" />
       </div>
     </ErrorBoundary>
