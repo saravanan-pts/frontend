@@ -4,15 +4,18 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, memo } from "react"
 import cytoscape, { Core } from "cytoscape";
 import cola from "cytoscape-cola";
 import dagre from "cytoscape-dagre";
+import fcose from "cytoscape-fcose"; // <--- Make sure this is installed
 import type { Entity, Relationship } from "@/types";
 
 if (typeof window !== "undefined") {
   cytoscape.use(cola);
   cytoscape.use(dagre);
+  cytoscape.use(fcose);
 }
 
 export interface GraphVisualizationRef {
   loadGraphData: (entities: Entity[], relationships: Relationship[]) => void;
+  // ... other methods ...
   addNode: (entity: Entity) => void;
   addEdge: (relationship: Relationship) => void;
   updateNode: (entity: Entity) => void;
@@ -38,19 +41,12 @@ interface GraphVisualizationProps {
 }
 
 const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualizationProps>(
-  ({ onNodeSelect, onNodeDeselect, onEdgeSelect, onEdgeDeselect, onContextMenu, onCreateNode, onCreateRelationship }, ref) => {
+  ({ onNodeSelect, onNodeDeselect, onEdgeSelect, onEdgeDeselect, onContextMenu }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<Core | null>(null);
-    const pendingDataRef = useRef<{ entities: Entity[]; relationships: Relationship[] } | null>(null);
 
     useEffect(() => {
       if (!containerRef.current) return;
-      
-      const handleResize = () => {
-        if (cyRef.current && !cyRef.current.destroyed()) {
-          cyRef.current.resize();
-        }
-      };
       
       const initCytoscape = () => {
         if (!containerRef.current) return;
@@ -65,13 +61,14 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
           Person: "#3b82f6", Organization: "#10b981", Location: "#f59e0b",
           Concept: "#8b5cf6", Technology: "#06b6d4",
           Event: "#ef4444", Activity: "#ef4444", Transaction: "#f97316",
-          Customer: "#3b82f6", Account: "#6366f1", Branch: "#10b981"
+          Community: "#e0e7ff"
         };
 
         try {
           cyRef.current = cytoscape({
             container: containerRef.current,
             style: [
+              // 1. STANDARD NODES
               {
                 selector: "node",
                 style: {
@@ -80,89 +77,139 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                     return entityColors[type] || "#6b7280";
                   },
                   "label": (ele) => {
+                    const type = ele.data("type");
+                    // HIDE LABEL if inside a box (too cluttered), show if standalone
+                    if (type === 'Community') return ''; 
                     const lbl = ele.data("label");
-                    const time = ele.data("timestamp");
-                    return time ? `${lbl}\n(${time.split('T')[1]?.substring(0,5)})` : lbl;
+                    return lbl && lbl.length > 15 ? lbl.substring(0, 15) + "..." : lbl;
                   },
-                  "width": 40, "height": 40, "text-wrap": "wrap", "text-max-width": "100px",
-                  "font-size": "10px", "color": "#ffffff",
+                  "width": 30, "height": 30,
+                  "font-size": "9px", "color": "#fff",
                   "text-valign": "center", "text-halign": "center"
                 },
               },
+              // 2. COMMUNITY BOXES (The "Big Nodes")
+              {
+                selector: "node[type='Community']",
+                style: {
+                  "background-color": "#f3f4f6",
+                  "background-opacity": 0.5,
+                  "border-width": 2,
+                  "border-color": "#8b5cf6",
+                  "border-style": "dashed",
+                  "label": "data(label)",
+                  "color": "#6d28d9",
+                  "font-size": "14px",
+                  "font-weight": "bold",
+                  "text-valign": "top",
+                  "text-halign": "center"
+                }
+              },
+              // 3. EDGES
               {
                 selector: "edge",
                 style: {
-                  "width": 2, "line-color": "#9ca3af", "target-arrow-color": "#9ca3af",
-                  "target-arrow-shape": "triangle", "curve-style": "bezier",
-                  "label": "data(type)", "font-size": "8px", "text-rotation": "autorotate"
-                },
-              },
-              {
-                selector: 'edge[type="NEXT"]',
-                style: {
-                  "width": 4, "line-color": "#ef4444", "target-arrow-color": "#ef4444",
-                  "label": "NEXT", "font-weight": "bold"
+                  "width": 1.5,
+                  "line-color": "#cbd5e1",
+                  "target-arrow-color": "#cbd5e1",
+                  "target-arrow-shape": "triangle",
+                  "curve-style": "bezier",
+                  "label": "data(type)",
+                  "font-size": "8px",
+                  "text-rotation": "autorotate"
                 }
               },
-              { selector: "node:selected", style: { "border-width": 4, "border-color": "#f59e0b" } },
-              // CSS Class for Filtering
               { selector: ".hidden", style: { "display": "none" } }
             ],
-            layout: { name: "cola", animate: false } as any,
-            minZoom: 0.1, maxZoom: 2,
+            layout: { name: "fcose" } as any, // Use default initially
+            minZoom: 0.1, maxZoom: 3,
           });
         } catch (error) { console.error(error); }
 
+        // Events
         cyRef.current?.on("tap", "node", (evt) => onNodeSelect?.(evt.target.data("id")));
         cyRef.current?.on("tap", "edge", (evt) => onEdgeSelect?.(evt.target.data("id")));
-        cyRef.current?.on("tap", (evt) => {
-            if (evt.target === cyRef.current) { onNodeDeselect?.(); onEdgeDeselect?.(); }
+        cyRef.current?.on("tap", (evt) => { if (evt.target === cyRef.current) { onNodeDeselect?.(); onEdgeDeselect?.(); } });
+        cyRef.current?.on("cxttap", (evt) => {
+            const oe = evt.originalEvent as MouseEvent;
+            const target = evt.target === cyRef.current ? "canvas" : (evt.target.isNode() ? "node" : "edge");
+            onContextMenu?.(oe.clientX, oe.clientY, target, evt.target.id?.(), evt.target.id?.());
         });
-
-        window.addEventListener("resize", handleResize);
       };
-
-      const timeoutId = setTimeout(initCytoscape, 0);
-      return () => { clearTimeout(timeoutId); window.removeEventListener("resize", handleResize); cyRef.current?.destroy(); };
+      
+      const t = setTimeout(initCytoscape, 0);
+      return () => clearTimeout(t);
     }, []);
 
     useImperativeHandle(ref, () => ({
       loadGraphData: (entities: Entity[], relationships: Relationship[]) => {
-        if (!cyRef.current || cyRef.current.destroyed()) {
-            pendingDataRef.current = { entities, relationships };
-            return;
-        }
+        if (!cyRef.current || cyRef.current.destroyed()) return;
+
         try {
+          const cy = cyRef.current;
+          cy.elements().remove();
+
+          // --- LOGIC: CONVERT 'BELONGS_TO' INTO PARENT CONTAINERS ---
+          const parentMap = new Map<string, string>(); 
+          const communityIds = new Set(entities.filter(e => e.type === "Community").map(e => e.id));
+
+          relationships.forEach(rel => {
+             // If X belongs to Community Y, tell Cytoscape "Y is parent of X"
+             if (rel.type === "BELONGS_TO" && communityIds.has(rel.to)) {
+                 parentMap.set(rel.from, rel.to);
+             }
+          });
+
+          // Add Nodes (Assigning 'parent' property)
           const nodes = entities.map(e => ({
-            data: { id: e.id, label: e.label, type: e.type, ...e.properties }
+            group: "nodes",
+            data: { 
+                id: e.id, 
+                label: e.label, 
+                type: e.type, 
+                parent: parentMap.get(e.id), // <--- THIS MAKES THEM GO INSIDE
+                ...e.properties 
+            }
           }));
-          
-          const validIds = new Set(nodes.map(n => n.data.id));
+
+          // Add Edges (Hide BELONGS_TO lines because the box shows it)
+          const validIds = new Set(entities.map(e => e.id));
           const edges = relationships
             .filter(r => validIds.has(r.from) && validIds.has(r.to))
-            .map(r => ({ data: { id: r.id, source: r.from, target: r.to, type: r.type } }));
+            .filter(r => r.type !== "BELONGS_TO") 
+            .map(r => ({ 
+                group: "edges",
+                data: { id: r.id, source: r.from, target: r.to, type: r.type } 
+            }));
 
-          cyRef.current.elements().remove();
-          cyRef.current.json({ elements: [...nodes, ...edges] });
-          cyRef.current.layout({ name: "cola", animate: false } as any).run();
-        } catch (e) { console.error(e); }
+          cy.add([...nodes, ...edges] as any);
+          
+          // RUN LAYOUT
+          cy.layout({ 
+              name: 'fcose', 
+              animate: true,
+              animationDuration: 800,
+              quality: "default",
+              nodeRepulsion: 5000,
+              idealEdgeLength: 60,
+              nestingFactor: 0.1, // Tight nesting
+              padding: 20
+          } as any).run();
+
+        } catch (e) { console.error("Graph Load Error:", e); }
       },
+
+      // ... Rest of the methods (addNode, filterByType, etc.) ...
       addNode: () => {}, addEdge: () => {}, updateNode: () => {}, updateEdge: () => {},
       removeNode: () => {}, removeEdge: () => {}, highlightNode: () => {}, highlightEdge: () => {},
-      
-      // --- FILTER IMPLEMENTATION ---
       filterByType: (types: string[]) => {
         if (!cyRef.current) return;
         const cy = cyRef.current;
         cy.batch(() => {
           cy.elements().removeClass("hidden");
           if (types.length > 0) {
-             // Hide all nodes that DO NOT match the selected types
-             // selector: "node[type != 'Person'][type != 'Organization']"
              const selector = types.map(t => `[type != "${t}"]`).join("");
              cy.nodes(selector).addClass("hidden");
-             
-             // Also hide edges connected to hidden nodes
              cy.edges().forEach(edge => {
                if (edge.source().hasClass("hidden") || edge.target().hasClass("hidden")) {
                  edge.addClass("hidden");
@@ -171,8 +218,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
           }
         });
       },
-      // -----------------------------
-
       exportGraph: (format) => { 
           if(format === 'json') {
               const json = cyRef.current?.json();

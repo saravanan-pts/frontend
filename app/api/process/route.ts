@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { surrealDB } from "@/lib/surrealdb-client";
 import { azureOpenAI } from "@/services/azure-openai";
-import { TABLES } from "@/lib/schema";
 import { graphOps } from "@/services/graph-operations";
+import { entityResolver } from "@/services/entity-resolver";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 300; // 5 Minutes Timeout
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,146 +27,133 @@ export async function POST(request: NextRequest) {
         fileType: "text",
     });
 
-    // 3. Process Sequentially
     const lines = textContent.split('\n').filter((line: string) => line.trim().length > 0);
     
-    // --- PRODUCTION FIX: Smart CSV Handling ---
+    // Smart Header Handling (for Context)
     let csvHeaders: string[] = [];
     if (lines.length > 0 && (!approvedMapping || approvedMapping.length === 0)) {
-        // If no mapping, we assume the first row is a Header.
-        // We will use this to give the AI context for "Smart Extraction".
         csvHeaders = lines[0].split(',').map((h: string) => h.trim().replace(/"/g, ''));
-        lines.shift(); // Remove header from data rows
-    } else if (approvedMapping && approvedMapping.length > 0 && lines[0].includes(approvedMapping[0]?.header_column)) {
-        lines.shift(); // Skip Header if mapping is provided
+    } 
+    if (approvedMapping && approvedMapping.length > 0 && lines[0].includes(approvedMapping[0]?.header_column)) {
+        lines.shift(); // Skip header if strictly mapped
     }
 
-    const BATCH_SIZE = 100; 
-    const rowsToProcess = lines.slice(0, BATCH_SIZE); 
-    
-    console.log(`Processing ${rowsToProcess.length} rows...`);
+    console.log(`Processing ${lines.length} rows...`);
 
+    const BATCH_SIZE = 10; 
     let entitiesInserted = 0;
     let relsInserted = 0;
-    let lastEventId: string | null = null; 
 
-    for (const row of rowsToProcess) {
-        let result;
-
-        // STRATEGY A: Strict Mapping (User defined schema)
-        if (approvedMapping && approvedMapping.length > 0) {
-             result = await azureOpenAI.extractGraphWithMapping(row, approvedMapping);
-        } 
-        // STRATEGY B: Smart Extraction (Infer precise verbs from context)
-        else {
-             // Construct a context-rich string: "ColumnName: Value, ColumnName: Value"
-             // This helps the AI understand the data without forcing generic "RELATED_TO" edges.
-             let contextRow = row;
-             if (csvHeaders.length > 0) {
-                 const values = row.split(',').map((v: string) => v.trim().replace(/"/g, ''));
-                 contextRow = csvHeaders.map((h, i) => `${h}: ${values[i] || ''}`).join(', ');
-             }
-             // Use the advanced extractor which prompts for "Precise Verbs"
-             result = await azureOpenAI.extractEntitiesAndRelationships(contextRow);
-        }
+    // 3. PHASE 1: PARALLEL INGESTION (Speed)
+    // We insert nodes and local relationships, but we DO NOT link the timeline yet.
+    for (let i = 0; i < lines.length; i += BATCH_SIZE) {
+        const batch = lines.slice(i, i + BATCH_SIZE);
         
-        // SAFEGUARDS
-        result.entities = result.entities || [];
-        result.relationships = result.relationships || [];
-
-        // --- DETERMINISTIC BACKFILL (Fixes "Entities: 0" issue) ---
-        const existingLabels = new Set(result.entities.map(e => e.label));
-        for (const rel of result.relationships) {
-            if (rel.from && !existingLabels.has(rel.from)) {
-                result.entities.push({ 
-                    label: rel.from, 
-                    type: "Concept", 
-                    properties: { source: "inferred", description: `Inferred node from relationship: ${rel.type}` } 
-                });
-                existingLabels.add(rel.from);
-            }
-            if (rel.to && !existingLabels.has(rel.to)) {
-                result.entities.push({ 
-                    label: rel.to, 
-                    type: "Concept", 
-                    properties: { source: "inferred", description: `Inferred node from relationship: ${rel.type}` } 
-                });
-                existingLabels.add(rel.to);
-            }
-        }
-        // -----------------------------------------------------------
-
-        let currentEventId: string | null = null;
-        const sanitizeId = (label: string) => label ? label.trim().replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() : "unknown";
-        const now = new Date().toISOString(); 
-
-        // A. Insert Entities
-        for (const entity of result.entities) {
-            if(!entity.label) continue;
-            const id = `entity:${sanitizeId(entity.label)}`;
-            
-            if (['Event', 'Activity', 'Transaction', 'Log'].includes(entity.type)) {
-                currentEventId = id;
-            }
-
+        await Promise.all(batch.map(async (row) => {
             try {
-                await db.create(id, {
-                    label: entity.label,
-                    type: entity.type || "Concept",
-                    properties: entity.properties || {}, 
-                    metadata: { source: document.id },
-                    createdAt: now,
-                    updatedAt: now
-                });
-                entitiesInserted++;
-            } catch (err) {
-                await db.merge(id, {
-                    properties: entity.properties || {},
-                    updatedAt: now
-                });
-            }
-        }
+                let result;
+                if (approvedMapping && approvedMapping.length > 0) {
+                     result = await azureOpenAI.extractGraphWithMapping(row, approvedMapping);
+                } else {
+                     let contextRow = row;
+                     if (csvHeaders.length > 0) {
+                         const values = row.split(',').map((v: string) => v.trim().replace(/"/g, ''));
+                         if (values.length >= csvHeaders.length - 1) {
+                            contextRow = csvHeaders.map((h, idx) => `${h}: ${values[idx] || ''}`).join(', ');
+                         }
+                     }
+                     result = await azureOpenAI.extractEntitiesAndRelationships(contextRow);
+                }
 
-        // B. Insert Relationships
-        for (const rel of result.relationships) {
-            if(!rel.from || !rel.to) continue;
-            const fromId = `entity:${sanitizeId(rel.from)}`;
-            const toId = `entity:${sanitizeId(rel.to)}`;
-            
-            // Fail-safe creation (though backfill should have handled this)
-            try { await db.create(fromId, { label: rel.from, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
-            try { await db.create(toId, { label: rel.to, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
+                if (!result || !result.entities) return;
 
-            // Ensure we don't have empty types
-            const relType = (rel.type || "RELATED_TO").replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
+                // Resolution & Insertion
+                const createdEntityIds: Record<string, string> = {}; 
+                const normalize = (s: string) => s ? s.toLowerCase().trim() : "";
+                
+                for (const extracted of result.entities) {
+                    if (!extracted.label) continue;
+                    
+                    const entity = await entityResolver.resolveAndCreate(extracted, document.id);
+                    createdEntityIds[extracted.label] = entity.id;
+                    createdEntityIds[normalize(extracted.label)] = entity.id;
+                    entitiesInserted++;
+                }
 
-            try { 
-                await db.query(`DEFINE TABLE ${relType} SCHEMALESS PERMISSIONS FULL`); 
-                await db.query(`
-                    RELATE ${fromId}->${relType}->${toId} 
-                    SET confidence=1.0, 
-                        source=$doc,
-                        createdAt='${now}'
-                `, { doc: document.id });
-                relsInserted++;
-            } catch (e) { console.error(e); }
-        }
+                for (const rel of result.relationships) {
+                    if (!rel.from || !rel.to) continue;
 
-        // C. Insert Timeline Chain
-        if (lastEventId && currentEventId) {
-            try {
+                    let fromId = createdEntityIds[rel.from] || createdEntityIds[normalize(rel.from)];
+                    let toId = createdEntityIds[rel.to] || createdEntityIds[normalize(rel.to)];
+
+                    if (!fromId) {
+                        const e = await entityResolver.resolveAndCreate({ label: rel.from, type: "Concept", confidence: 0.8 }, document.id);
+                        fromId = e.id;
+                    }
+                    if (!toId) {
+                        const e = await entityResolver.resolveAndCreate({ label: rel.to, type: "Concept", confidence: 0.8 }, document.id);
+                        toId = e.id;
+                    }
+
+                    const relType = (rel.type || "RELATED_TO").replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
+                    const now = new Date().toISOString();
+
+                    try {
+                        await db.query(`DEFINE TABLE ${relType} SCHEMALESS PERMISSIONS FULL`);
+                        await db.query(`
+                            RELATE ${fromId}->${relType}->${toId} 
+                            SET confidence=${rel.confidence || 1.0}, 
+                                source=$doc,
+                                createdAt='${now}'
+                        `, { doc: document.id });
+                        relsInserted++;
+                    } catch (e) { console.error(e); }
+                }
+            } catch (err) { console.error("Row Error:", err); }
+        }));
+    }
+
+    // 4. PHASE 2: CHRONOLOGICAL LINKING (Logic)
+    // Now we sort by timestamp and build the event chain
+    console.log("Linking Events by Timestamp...");
+    
+    try {
+        // Find all events from this document that have timestamps
+        // We order them by TIME, not by when they were inserted
+        const query = `
+            SELECT id, properties.timestamp as time 
+            FROM entity 
+            WHERE metadata.source = $doc 
+              AND (
+                 type IN ['Event', 'Activity', 'Log', 'Transaction', 'Step', 'Action'] 
+                 OR properties.timestamp != NONE
+              )
+            ORDER BY time ASC;
+        `;
+        
+        const events = await db.query(query, { doc: document.id });
+        // @ts-ignore
+        const sortedEvents = events[0]?.result || [];
+
+        if (sortedEvents.length > 1) {
+            for (let i = 0; i < sortedEvents.length - 1; i++) {
+                const current = sortedEvents[i];
+                const next = sortedEvents[i+1];
+                
+                // Only link if they actually have times, or if we trust the sort order
+                // If time is missing, they will be at the bottom/top, so checking != NONE is safer but optional
+                
                 await db.query(`DEFINE TABLE NEXT SCHEMALESS PERMISSIONS FULL`);
                 await db.query(`
-                    RELATE ${lastEventId}->NEXT->${currentEventId} 
-                    SET type='Sequence', 
-                        source=$doc,
-                        createdAt='${now}'
+                    RELATE ${current.id}->NEXT->${next.id}
+                    SET type='Sequence', source=$doc, confidence=1.0
                 `, { doc: document.id });
                 relsInserted++;
-            } catch (e) {}
+            }
+            console.log(`Linked ${sortedEvents.length} events chronologically.`);
         }
-
-        if (currentEventId) lastEventId = currentEventId;
+    } catch (e) {
+        console.error("Timeline Linking Failed:", e);
     }
 
     await graphOps.updateDocument(document.id, { entityCount: entitiesInserted, relationshipCount: relsInserted });
@@ -174,11 +161,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       stats: { entitiesInserted, relsInserted },
-      entities: [], relationships: []
+      message: `Processed and chronologically linked ${lines.length} rows.`
     });
 
   } catch (error: any) {
-    console.error("Processing Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

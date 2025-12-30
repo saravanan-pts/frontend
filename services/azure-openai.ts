@@ -27,13 +27,11 @@ export class AzureOpenAIService {
   }
 
   // --- 1. GENERIC COMPLETION (For Community Summaries) ---
-  // Used by: services/graph-analytics.ts
   async generateCompletion(prompt: string, jsonMode: boolean = true): Promise<any> {
     return this.callOpenAI(prompt, 0.5, jsonMode);
   }
 
   // --- 2. ENTITY COMPARISON (For Entity Resolution) ---
-  // Used by: services/entity-resolver.ts
   async areEntitiesSame(newEntity: any, existingEntity: any): Promise<boolean> {
       const prompt = `
         Task: Entity Resolution
@@ -50,33 +48,30 @@ export class AzureOpenAIService {
       
       try {
           const result = await this.callOpenAI(prompt, 0.0, true);
-          // Handle both boolean and string responses safely
           return result.isMatch === true || result.isMatch === "true";
       } catch (e) {
-          console.warn("Resolution failed, assuming false", e);
           return false;
       }
   }
 
-  // --- 3. ADVANCED GRAPH EXTRACTION ---
-  // Used by: services/document-processor.ts
+  // --- 3. ADVANCED GRAPH EXTRACTION (TIME-AWARE) ---
   async extractEntitiesAndRelationships(text: string): Promise<EntityExtractionResult> {
     const prompt = `
       Analyze this text and extract Knowledge Graph elements.
       
       ### EXTRACTION RULES
       1. **Entities:** Extract precise entities (Person, Organization, Location, Event, Concept).
-         - **CRITICAL:** You MUST add a 'description' property to every entity summarizing its context (e.g. "CEO of Google", "Date of meeting"). 
-         - This 'description' is required for identifying duplicates later.
-      2. **Relationships:** Use precise verbs (EMPLOYED_BY, LOCATED_IN, PERFORMED). Avoid generic "RELATED_TO".
-      3. **Events:** If the text describes a specific action/transaction, create an 'Event' node.
+         - **CONTEXT:** Add a 'description' property to every entity.
+         - **TIMESTAMPS:** If this is an Event/Log, you MUST extract the 'timestamp' property in ISO 8601 format (YYYY-MM-DDTHH:mm:ss) if available. If strict ISO is not possible, return the raw date string.
+      2. **Relationships:** Use precise verbs (EMPLOYED_BY, LOCATED_IN, PERFORMED).
+      3. **Events:** If the text describes a specific action, transaction, or log entry, classify it as an 'Event' or 'Log'.
       
       ### INPUT TEXT
       ${text.substring(0, 8000)}
 
       ### OUTPUT FORMAT (JSON)
       { 
-        "entities": [ { "label": "...", "type": "...", "properties": { "description": "..." } } ], 
+        "entities": [ { "label": "...", "type": "...", "properties": { "description": "...", "timestamp": "..." } } ], 
         "relationships": [ { "from": "...", "to": "...", "type": "..." } ] 
       }
     `;
@@ -84,7 +79,6 @@ export class AzureOpenAIService {
   }
 
   // --- 4. STRUCTURED MAPPING EXTRACTION ---
-  // Used by: services/document-processor.ts (for CSV/Excel)
   async extractGraphWithMapping(rowText: string, mapping: any[]): Promise<EntityExtractionResult> {
     const rules = mapping.map((m: any) => 
       `- If you see column "${m.header_column}", create relationship "${m.relationship_type}" to entity "${m.target_entity}".`
@@ -97,9 +91,8 @@ export class AzureOpenAIService {
       ${rules}
 
       ### ENRICHMENT RULES
-      1. **Context:** Add a 'description' property to every entity based on the other columns in the row.
-      2. **Events:** If the row represents a log or transaction, treat the main entity as an 'Event'.
-      3. **Completeness:** You MUST explicitly list every entity found in the 'relationships' array in the 'entities' array.
+      1. **Context:** Add 'description' and 'timestamp' properties based on the row data.
+      2. **Events:** If the row represents a log, treat the main entity as an 'Event'.
       
       ### INPUT ROW
       ${rowText}
@@ -141,7 +134,6 @@ export class AzureOpenAIService {
 
       } catch (error: any) {
         attempt++;
-        console.warn(`[AzureOpenAI] Attempt ${attempt} failed: ${error.message}`);
         if (attempt >= this.maxRetries) throw error;
         await this.sleep(this.baseDelay * Math.pow(2, attempt - 1));
       }
