@@ -10,8 +10,13 @@ export class EntityResolver {
    */
   async resolveAndCreate(extracted: ExtractedEntity, sourceId: string): Promise<Entity> {
     try {
+      // --- FIX 1: Safely Handle Search Results ---
+      // graphOps.searchEntities returns { entities: [], relationships: [] }
+      // We must extract the array before using .find()
+      const searchResult = await graphOps.searchEntities(extracted.label);
+      const exactMatches = searchResult.entities || []; 
+
       // 1. Quick Check: Exact Label Match
-      const exactMatches = await graphOps.searchEntities(extracted.label);
       const exactMatch = exactMatches.find(e => e.label.toLowerCase() === extracted.label.toLowerCase());
       
       if (exactMatch) {

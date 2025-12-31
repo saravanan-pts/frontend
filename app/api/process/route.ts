@@ -17,12 +17,16 @@ export async function POST(request: NextRequest) {
     try { body = await request.json(); } 
     catch (e) { return NextResponse.json({ error: "Invalid JSON" }, { status: 400 }); }
 
-    const { textContent, fileName, approvedMapping } = body;
+    // --- FIX 3A: Robust Filename Handling ---
+    // Check both 'fileName' and 'filename' to handle different clients
+    const { textContent, fileName, filename, approvedMapping } = body;
+    const finalFileName = fileName || filename || "input.txt";
+
     if (!textContent) return NextResponse.json({ error: "No text content" }, { status: 400 });
 
     // 2. Create Document Record
     const document = await graphOps.createDocument({
-        filename: fileName || "input.txt",
+        filename: finalFileName,
         content: textContent,
         fileType: "text",
     });
@@ -34,7 +38,6 @@ export async function POST(request: NextRequest) {
     let csvHeaders: string[] = [];
     if (lines.length > 0 && (!approvedMapping || approvedMapping.length === 0)) {
         // If no mapping, we assume the first row is a Header.
-        // We will use this to give the AI context for "Smart Extraction".
         csvHeaders = lines[0].split(',').map((h: string) => h.trim().replace(/"/g, ''));
         lines.shift(); // Remove header from data rows
     } else if (approvedMapping && approvedMapping.length > 0 && lines[0].includes(approvedMapping[0]?.header_column)) {
@@ -60,13 +63,11 @@ export async function POST(request: NextRequest) {
         // STRATEGY B: Smart Extraction (Infer precise verbs from context)
         else {
              // Construct a context-rich string: "ColumnName: Value, ColumnName: Value"
-             // This helps the AI understand the data without forcing generic "RELATED_TO" edges.
              let contextRow = row;
              if (csvHeaders.length > 0) {
                  const values = row.split(',').map((v: string) => v.trim().replace(/"/g, ''));
                  contextRow = csvHeaders.map((h, i) => `${h}: ${values[i] || ''}`).join(', ');
              }
-             // Use the advanced extractor which prompts for "Precise Verbs"
              result = await azureOpenAI.extractEntitiesAndRelationships(contextRow);
         }
         
@@ -133,11 +134,10 @@ export async function POST(request: NextRequest) {
             const fromId = `entity:${sanitizeId(rel.from)}`;
             const toId = `entity:${sanitizeId(rel.to)}`;
             
-            // Fail-safe creation (though backfill should have handled this)
+            // Fail-safe creation
             try { await db.create(fromId, { label: rel.from, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
             try { await db.create(toId, { label: rel.to, type: "Implicit", metadata: { source: document.id }, createdAt: now, updatedAt: now }); } catch(e) { /* Exists */ }
 
-            // Ensure we don't have empty types
             const relType = (rel.type || "RELATED_TO").replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase();
 
             try { 
