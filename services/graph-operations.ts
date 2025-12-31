@@ -16,29 +16,22 @@ export class GraphOperations {
   // --- NEW: Delete by Filename Helper ---
   async deleteDocumentByFilename(filename: string): Promise<boolean> {
       try {
-          // 1. Find the ID first
           const query = `SELECT id FROM document WHERE filename = $filename LIMIT 1`;
           const result = await this.db.query(query, { filename });
-          
           // @ts-ignore
           const record = result[0]?.result?.[0];
           
           if (!record || !record.id) {
               throw new Error(`File '${filename}' not found in database.`);
           }
-
           console.log(`[GraphOps] Found ID ${record.id} for file '${filename}'. Deleting...`);
-          
-          // 2. Call the main delete function using the found ID
           return await this.deleteDocument(record.id);
-
       } catch (e: any) {
           console.error("Delete by Filename Error:", e);
           throw e;
       }
   }
 
-  // --- 1. CASCADE DELETE (Main Logic) ---
   async deleteDocument(id: string): Promise<boolean> {
       try {
           console.log(`[GraphOps] Starting cascade delete for document: ${id}`);
@@ -51,15 +44,10 @@ export class GraphOperations {
           const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
           const edgeTables = allTableNames.filter(t => !exclude.includes(t));
 
-          // Delete Relationships
           for (const table of edgeTables) {
              try { await this.db.query(`DELETE FROM ${table} WHERE source = $id`, { id }); } catch(e) {}
           }
-
-          // Delete Entities
           await this.db.query(`DELETE FROM entity WHERE metadata.source = $id`, { id });
-
-          // Delete Document
           await this.db.delete(id);
           
           console.log(`[GraphOps] Successfully deleted document ${id} and its data.`);
@@ -194,7 +182,6 @@ export class GraphOperations {
 
   async deleteRelationship(id: string): Promise<void> { await this.db.delete(id); }
 
-  // --- 5. CLEAR ALL DATA ---
   async clearAllData() {
     try {
       console.log("[Clear] Starting full database wipe...");
@@ -211,16 +198,13 @@ export class GraphOperations {
     }
   }
 
-  // --- 6. STATISTICS (New Feature) ---
   async getStats() {
     try {
-      // Run parallel queries for speed
       const [entityRes, relRes, docRes] = await Promise.all([
         this.db.query('SELECT count() FROM entity GROUP ALL'),
         this.db.query('SELECT count() FROM relationship GROUP ALL'),
         this.db.query('SELECT count() FROM document GROUP ALL')
       ]);
-
       // @ts-ignore
       const entityCount = entityRes[0]?.result?.[0]?.count || 0;
       // @ts-ignore
@@ -271,17 +255,71 @@ export class GraphOperations {
     return { id: r.id, from: r.from || r.in, to: r.to || r.out, type: r.id ? r.id.split(':')[0] : "Edge", properties: r.properties || {}, confidence: r.confidence, source: r.source, createdAt: r.createdAt };
   }
 
-  private mapRecordToDocument(r: any): Document { return { id: r.id, filename: r.filename, content: r.content, fileType: r.fileType, uploadedAt: r.uploadedAt, processedAt: r.processedAt, entityCount: r.entityCount, relationshipCount: r.relationshipCount }; }
+  private mapRecordToDocument(r: any): Document { 
+    return { 
+        id: r.id, 
+        filename: r.filename, 
+        content: r.content, 
+        fileType: r.fileType, 
+        // FIX: Fallback to createdAt if uploadedAt is missing to prevent frontend crashes
+        uploadedAt: r.uploadedAt || r.createdAt || new Date().toISOString(), 
+        processedAt: r.processedAt, 
+        entityCount: r.entityCount, 
+        relationshipCount: r.relationshipCount 
+    }; 
+  }
   
-  async getAllEntities() { return (await this.getGraphData()).entities; }
+  // --- FIX: FETCH FROM API ---
+  async getAllDocuments(): Promise<Document[]> {
+    try {
+      // 1. If running in the browser, fetch from the Next.js API
+      if (typeof window !== 'undefined') {
+        const response = await fetch('/api/documents');
+        if (!response.ok) throw new Error("Failed to fetch documents");
+        return await response.json();
+      }
+
+      // 2. If running server-side, query DB directly
+      const result = await this.db.query(`
+        SELECT 
+          id, filename, fileType, entityCount, relationshipCount, 
+          createdAt, processedAt 
+        FROM document 
+        ORDER BY createdAt DESC
+      `);
+      
+      // @ts-ignore
+      const docs = result[0]?.result || [];
+      return docs.map((d: any) => this.mapRecordToDocument(d));
+
+    } catch (e) {
+      console.error("[GraphOps] Get Documents Error:", e);
+      return [];
+    }
+  }
+
   async getEntitiesByDocument(id: string) { return (await this.getGraphData(id)).entities; } 
-  async createDocument(d: any) { const payload = { ...d, createdAt: new Date().toISOString(), processedAt: new Date().toISOString(), entityCount: 0, relationshipCount: 0 }; const r = await this.db.create(TABLES.DOCUMENT, payload); return this.mapRecordToDocument(r[0]); }
+  async getAllEntities() { return (await this.getGraphData()).entities; }
+
+  async createDocument(data: { filename: string; content: string; fileType: string }) {
+    const payload = { 
+        filename: data.filename,
+        content: data.content,
+        fileType: data.fileType,
+        entityCount: 0,
+        relationshipCount: 0,
+        createdAt: new Date().toISOString(),
+        processedAt: new Date().toISOString()
+    };
+    const r = await this.db.create(TABLES.DOCUMENT, payload);
+    return this.mapRecordToDocument(r[0]);
+  }
+
   async updateDocument(id: string, u: any) { const r = await this.db.merge(id, u); return this.mapRecordToDocument(r); }
   async getNeighbors(id: string) { return { entities:[], relationships:[] }; }
   async getSubgraph(ids: string[]) { return { entities:[], relationships:[] }; }
   async getEntity(id: string) { return null; }
   async getRelationship(id: string) { return null; }
-  async getAllDocuments() { return []; }
 }
 
 export const graphOps = new GraphOperations();
