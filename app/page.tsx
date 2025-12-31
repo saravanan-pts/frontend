@@ -5,10 +5,9 @@ import { Toaster, toast } from "react-hot-toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import GraphVisualization, { type GraphVisualizationRef } from "@/components/GraphVisualization";
 import GraphControls from "@/components/GraphControls";
-import GraphSelector from "@/components/GraphSelector";
 import NodeDetailPanel from "@/components/NodeDetailPanel";
 import FilterPanel from "@/components/FilterPanel"; 
-import MainSidebar from "@/components/MainSidebar"; // <--- Main Sidebar
+import MainSidebar from "@/components/MainSidebar";
 import FileUpload from "@/components/FileUpload";
 import TextInput from "@/components/TextInput";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -18,32 +17,36 @@ import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
 import { useGraph } from "@/hooks/useGraph";
 import { useSurrealDB } from "@/hooks/useSurrealDB";
-import { Upload, FileText, Info, Settings, RefreshCw } from "lucide-react";
+import { Upload, FileText, Info, Settings, RefreshCw, Trash2 } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
 
 export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
-  const { activeTab, setActiveTab, setSelectedEntity } = useGraphStore();
+  
+  // FIX: Added 'selectedEntity' here so we can use it as a fallback for creating relationships
+  const { activeTab, setActiveTab, setSelectedEntity, selectedEntity } = useGraphStore();
   
   const { 
     entities, 
     relationships, 
     loadGraph, 
-    searchGraph,
     analyzeGraph, 
     createEntity, 
-    updateEntity, 
+    updateEntity,
     deleteEntity, 
     createRelationship, 
-    updateRelationship, 
-    deleteRelationship, 
-    selectRelationship 
+    updateRelationship,
+    deleteRelationship 
   } = useGraph();
 
   const { isConnected } = useSurrealDB();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null); 
+  
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   // UI State
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true); 
 
@@ -56,21 +59,35 @@ export default function Home() {
   const [relationshipToId, setRelationshipToId] = useState<string | undefined>();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget; nodeId?: string; edgeId?: string; } | null>(null);
 
-  // --- FILTER STATE ---
+  // Filter State
   const [allEntityTypes, setAllEntityTypes] = useState<string[]>([]);
   const [allRelTypes, setAllRelTypes] = useState<string[]>([]);
-  
   const [selectedEntityFilters, setSelectedEntityFilters] = useState<string[]>([]);
   const [selectedRelFilters, setSelectedRelFilters] = useState<string[]>([]);
 
-  // Stabilize Data
-  const stableEntities = useMemo(() => entities, [entities.length]);
-  const stableRelationships = useMemo(() => relationships, [relationships.length]);
+  // STOP INFINITE RELOADS: Use JSON.stringify for stable dependency comparison
+  const stableEntities = useMemo(() => entities, [JSON.stringify(entities)]);
+  const stableRelationships = useMemo(() => relationships, [JSON.stringify(relationships)]);
+
+  const fetchDocuments = async () => {
+    try {
+      const res = await fetch("/api/documents");
+      if (res.ok) {
+        const data = await res.json();
+        setDocuments(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch documents:", e);
+    }
+  };
 
   // 1. Initial Data Load
   useEffect(() => {
     const init = async () => {
-      try { await loadGraph(selectedDocumentId); } 
+      try { 
+        await fetchDocuments();
+        await loadGraph(selectedDocumentId || null); 
+      } 
       catch (e) { console.error("Initialization error:", e); } 
       finally { setIsInitialLoad(false); }
     };
@@ -102,11 +119,9 @@ export default function Home() {
   useEffect(() => {
       if (graphRef.current) {
           graphRef.current.filterByType(selectedEntityFilters);
-          graphRef.current.filterByRelationship(selectedRelFilters);
       }
   }, [selectedEntityFilters, selectedRelFilters]);
 
-  // Filter Handlers
   const toggleEntityFilter = (type: string) => {
       setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
   };
@@ -115,11 +130,50 @@ export default function Home() {
       setSelectedRelFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
   };
 
-  // --- Other Handlers ---
+  const handleDeleteFile = async () => {
+    if (!selectedDocumentId) return;
+
+    const doc = documents.find(d => d.id === selectedDocumentId);
+    if (!doc) return;
+
+    if (!confirm(`Are you sure you want to delete "${doc.filename}" and all its graph data?`)) {
+      return;
+    }
+
+    setIsDeleting(true);
+    const toastId = toast.loading("Deleting file...");
+
+    try {
+      const response = await fetch('/api/documents', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: doc.filename }),
+      });
+
+      if (response.ok) {
+        toast.success("File deleted successfully", { id: toastId });
+        setDocuments(prev => prev.filter(d => d.id !== selectedDocumentId));
+        setSelectedDocumentId(null); 
+        await loadGraph(null);
+      } else {
+        throw new Error("Delete failed");
+      }
+    } catch (error) {
+      console.error("Delete Error:", error);
+      toast.error("Failed to delete file", { id: toastId });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // --- Handlers ---
   const handleEntitySubmit = async (data: any) => {
     try {
       if (editingEntity) await updateEntity(editingEntity.id, data);
       else await createEntity(data);
+      
+      await loadGraph(selectedDocumentId);
+      
       toast.success("Entity saved");
       setShowEntityForm(false); setEditingEntity(null);
     } catch (error: any) { toast.error("Failed to save entity"); }
@@ -129,10 +183,87 @@ export default function Home() {
     try {
       if (editingRelationship) await updateRelationship(editingRelationship.id, { from, to, type, properties, confidence });
       else await createRelationship(from, to, type, properties, confidence);
+      
+      await loadGraph(selectedDocumentId);
+
       toast.success("Relationship saved");
       setShowRelationshipForm(false); setEditingRelationship(null);
     } catch (error: any) { toast.error("Failed to save relationship"); }
   };
+
+  // --- CONTEXT MENU HANDLERS ---
+  
+  const handleEditNode = (nodeId?: string) => {
+      if (!nodeId) return;
+      const entity = entities.find(e => e.id === nodeId);
+      if (entity) {
+          setEditingEntity(entity);
+          setShowEntityForm(true);
+          setContextMenu(null);
+      }
+  };
+
+  const handleDeleteNode = async (nodeId?: string) => {
+      if (!nodeId) return;
+      if (!confirm("Are you sure you want to delete this node?")) return;
+      try {
+          await deleteEntity(nodeId);
+          await loadGraph(selectedDocumentId);
+          toast.success("Node deleted");
+          setContextMenu(null);
+          setSelectedEntity(null);
+      } catch (e) { toast.error("Failed to delete node"); }
+  };
+
+  const handleEditRelationship = (edgeId?: string) => {
+      if (!edgeId) return;
+      const rel = relationships.find(r => r.id === edgeId);
+      if (rel) {
+          setEditingRelationship(rel);
+          setRelationshipFromId(rel.from);
+          setRelationshipToId(rel.to);
+          setShowRelationshipForm(true);
+          setContextMenu(null);
+      }
+  };
+
+  const handleDeleteRelationship = async (edgeId?: string) => {
+      if (!edgeId) return;
+      if (!confirm("Are you sure you want to delete this relationship?")) return;
+      try {
+          await deleteRelationship(edgeId);
+          await loadGraph(selectedDocumentId);
+          toast.success("Relationship deleted");
+          setContextMenu(null);
+      } catch (e) { toast.error("Failed to delete relationship"); }
+  };
+
+  // --- CRITICAL FIX: Robust "Create Relationship" Handler ---
+  // Handles: Context Menu click, Details Panel Button click, and Direct calls
+  const handleCreateRelationship = (arg?: string | unknown) => { 
+      setEditingRelationship(null); 
+      let fromId: string | undefined = undefined;
+
+      // 1. Check if a string ID was passed directly (Context menu often does this)
+      if (typeof arg === 'string') {
+          fromId = arg;
+      } 
+      // 2. Check if triggered from Context Menu state
+      else if (contextMenu?.nodeId) {
+          fromId = contextMenu.nodeId;
+      }
+      // 3. Fallback: Check if an entity is currently selected (Details Panel button)
+      else if (selectedEntity) {
+          fromId = selectedEntity.id;
+      }
+      
+      setRelationshipFromId(fromId); 
+      setRelationshipToId(undefined); 
+      setShowRelationshipForm(true); 
+      setContextMenu(null);
+  };
+  
+  const handleCreateNode = () => { setEditingEntity(null); setShowEntityForm(true); setContextMenu(null); };
 
   const handleSearch = async (query: string) => {
     if (!query.trim()) {
@@ -140,6 +271,7 @@ export default function Home() {
         return;
     }
     if (graphRef.current) graphRef.current.searchAndHighlight(query);
+    
     const term = query.toLowerCase();
     const match = entities.find(e => (e.label || "").toLowerCase().includes(term));
     if (match) {
@@ -160,12 +292,11 @@ export default function Home() {
 
   const handleForceRefresh = () => {
      if(graphRef.current) graphRef.current.fit();
+     fetchDocuments();
      loadGraph(selectedDocumentId);
   };
 
   const handleContextMenu = (x: number, y: number, target: ContextMenuTarget, nodeId?: string, edgeId?: string) => setContextMenu({ x, y, target, nodeId, edgeId });
-  const handleCreateNode = () => { setEditingEntity(null); setShowEntityForm(true); };
-  const handleCreateRelationship = (fromEntityId?: string) => { setEditingRelationship(null); setRelationshipFromId(fromEntityId || contextMenu?.nodeId); setRelationshipToId(undefined); setShowRelationshipForm(true); };
   const handleNodeSelect = (id: string) => { const e = entities.find(x => x.id === id); if(e) { setSelectedEntity(e); setActiveTab("details"); } };
   const handleNodeDeselect = () => setSelectedEntity(null);
 
@@ -180,12 +311,10 @@ export default function Home() {
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row overflow-hidden">
         
-        {/* 1. MAIN SIDEBAR (Text + Icons) */}
         <div className="hidden md:block">
            <MainSidebar />
         </div>
 
-        {/* 2. FILTER SIDEBAR (Collapsible) */}
         {isFilterPanelOpen && (
            <div className="hidden md:block border-r border-gray-200">
              <FilterPanel 
@@ -200,9 +329,7 @@ export default function Home() {
            </div>
         )}
 
-        {/* 3. MAIN CONTENT (Graph + Controls + Right Panel) */}
         <div className="flex-1 flex flex-col h-full overflow-hidden">
-           {/* Header moved inside main content area for this layout style */}
            <header className="bg-white border-b border-gray-200 shadow-sm z-20 px-6 py-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
                  <h2 className="text-xl font-semibold text-gray-800">Knowledge Graph POC</h2>
@@ -213,10 +340,33 @@ export default function Home() {
            </header>
 
            <div className="flex-1 flex flex-row overflow-hidden bg-gray-50">
-             {/* GRAPH AREA */}
              <div className="flex-1 flex flex-col min-w-0">
                <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end">
-                 <GraphSelector selectedDocumentId={selectedDocumentId} onSelectDocument={setSelectedDocumentId} onRefresh={() => loadGraph(selectedDocumentId)} />
+                 
+                 <div className="flex items-center gap-2 max-w-md w-full">
+                    <select
+                        value={selectedDocumentId || ""}
+                        onChange={(e) => setSelectedDocumentId(e.target.value || null)}
+                        className="flex-1 p-2 border border-gray-300 rounded-md text-sm"
+                    >
+                        <option value="">-- Load All / Select File --</option>
+                        {documents.map((doc) => (
+                            <option key={doc.id} value={doc.id}>
+                                {doc.filename} ({doc.entityCount} nodes)
+                            </option>
+                        ))}
+                    </select>
+
+                    <button
+                        onClick={handleDeleteFile}
+                        disabled={!selectedDocumentId || isDeleting}
+                        className="p-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-md disabled:opacity-50 border border-red-200 transition-colors"
+                        title="Delete selected file"
+                    >
+                        <Trash2 className="w-4 h-4" />
+                    </button>
+                 </div>
+
                </div>
                
                <GraphControls 
@@ -249,7 +399,6 @@ export default function Home() {
                </div>
              </div>
 
-             {/* RIGHT PANEL */}
              <div className="w-80 lg:w-96 bg-white border-l border-gray-200 flex flex-col z-10">
                <div className="flex border-b border-gray-200 overflow-x-auto">
                  {tabs.map((tab) => {
@@ -271,10 +420,26 @@ export default function Home() {
            </div>
         </div>
         
-        {/* Modals */}
         {showEntityForm && <EntityForm entity={editingEntity || undefined} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
         {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={entities} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
-        {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} target={contextMenu.target} onCreateNode={handleCreateNode} onEditNode={()=>{}} onDeleteNode={()=>{}} onCreateRelationship={()=>{}} onEditEdge={()=>{}} onDeleteEdge={()=>{}} onClose={() => setContextMenu(null)} />}
+        
+        {contextMenu && (
+            <ContextMenu 
+                x={contextMenu.x} 
+                y={contextMenu.y} 
+                target={contextMenu.target} 
+                onCreateNode={handleCreateNode} 
+                onEditNode={() => handleEditNode(contextMenu.nodeId)} 
+                onDeleteNode={() => handleDeleteNode(contextMenu.nodeId)} 
+                
+                onCreateRelationship={() => handleCreateRelationship(contextMenu.nodeId)} 
+                onEditEdge={() => handleEditRelationship(contextMenu.edgeId)} 
+                onDeleteEdge={() => handleDeleteRelationship(contextMenu.edgeId)} 
+                
+                onClose={() => setContextMenu(null)} 
+            />
+        )}
+
         <Toaster position="top-right" />
       </div>
     </ErrorBoundary>

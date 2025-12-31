@@ -13,3 +13,4 @@ docs/
 # Environment files (IMPORTANT)
 .env
 .env.*
+demo.csv
