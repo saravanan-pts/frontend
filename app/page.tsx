@@ -119,6 +119,7 @@ export default function Home() {
   useEffect(() => {
       if (graphRef.current) {
           graphRef.current.filterByType(selectedEntityFilters);
+          graphRef.current.filterByRelationship(selectedRelFilters);
       }
   }, [selectedEntityFilters, selectedRelFilters]);
 
