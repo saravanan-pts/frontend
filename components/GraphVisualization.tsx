@@ -282,10 +282,10 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         if (!cyRef.current) return;
         const cy = cyRef.current;
         cy.batch(() => {
-           cy.edges().removeClass("hidden");
+           cy.edges().addClass("hidden");
            if (visibleTypes.length > 0) {
-              const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
-              cy.edges(selector).addClass('hidden');
+              const selector = visibleTypes.map(t => `[type = "${t}"]`).join(", ");
+              cy.edges(selector).removeClass("hidden");
            }
         });
       },
