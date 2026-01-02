@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { X, Plus, Trash2 } from "lucide-react";
 import { RELATIONSHIP_TYPES } from "@/lib/schema";
 import type { Relationship, RelationshipType, Entity } from "@/types";
 
 interface RelationshipFormProps {
-  fromEntityId?: string; // Pre-fill from entity
-  toEntityId?: string; // Pre-fill to entity
-  relationship?: Relationship; // If provided, form is in edit mode
-  entities: Entity[]; // List of entities for dropdowns
+  fromEntityId?: string;
+  toEntityId?: string;
+  relationship?: Relationship;
+  entities: Entity[];
+  existingRelationships?: Relationship[];
   onSubmit: (
     from: string,
     to: string,
@@ -24,32 +25,57 @@ export default function RelationshipForm({
   fromEntityId,
   toEntityId,
   relationship,
-  entities,
+  entities = [], // Default to empty array for safety
+  existingRelationships = [],
   onSubmit,
   onCancel,
 }: RelationshipFormProps) {
-  const [from, setFrom] = useState(
-    relationship?.from || fromEntityId || ""
-  );
+  
+  const [from, setFrom] = useState(relationship?.from || fromEntityId || "");
   const [to, setTo] = useState(relationship?.to || toEntityId || "");
-  const [type, setType] = useState<RelationshipType>(
-    relationship?.type || "RELATED_TO"
-  );
-  const [properties, setProperties] = useState<Record<string, any>>(
-    relationship?.properties || {}
-  );
-  const [confidence, setConfidence] = useState<number>(
-    relationship?.confidence ?? 1.0
-  );
+  // Default to RELATED_TO so the input is never empty
+  const [type, setType] = useState<string>(relationship?.type || "RELATED_TO");
+  
+  const [properties, setProperties] = useState<Record<string, any>>(relationship?.properties || {});
+  const [confidence, setConfidence] = useState<number>(relationship?.confidence ?? 1.0);
   const [newPropertyKey, setNewPropertyKey] = useState("");
   const [newPropertyValue, setNewPropertyValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Filter out the selected "from" entity from "to" dropdown
-  const availableToEntities = entities.filter((e) => e.id !== from);
-  // Filter out the selected "to" entity from "from" dropdown
-  const availableFromEntities = entities.filter((e) => e.id !== to);
+  // --- FIX: ROBUST DROPDOWN LOGIC ---
+  const relationshipOptions = useMemo(() => {
+    // 1. Start with Hardcoded Defaults (Guarantees dropdown is never empty)
+    const defaults = [
+        "RELATED_TO", "WORKS_FOR", "LOCATED_IN", "HAS", "PART_OF", 
+        "KNOWS", "OWNS", "DEPENDS_ON", "MANAGES", "CREATED_BY",
+        "MEMBER_OF", "HAS_ROLE", "SUPPLIES_TO", "CONTACT_FOR"
+    ];
+    const options = new Set<string>(defaults);
+
+    // 2. Add Schema Types (if imported correctly)
+    if (Array.isArray(RELATIONSHIP_TYPES)) {
+        RELATIONSHIP_TYPES.forEach(t => options.add(t));
+    }
+
+    // 3. Add types found in the existing graph
+    if (Array.isArray(existingRelationships)) {
+        existingRelationships.forEach(r => {
+            if (r.type) options.add(r.type);
+        });
+    }
+
+    return Array.from(options).sort();
+  }, [existingRelationships]);
+
+  // Sync state if props change
+  useEffect(() => {
+    if (fromEntityId) setFrom(String(fromEntityId));
+    if (toEntityId) setTo(String(toEntityId));
+  }, [fromEntityId, toEntityId]);
+
+  const availableToEntities = entities.filter((e) => String(e.id) !== from);
+  const availableFromEntities = entities.filter((e) => String(e.id) !== to);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -65,10 +91,25 @@ export default function RelationshipForm({
       return;
     }
 
+    if (!type.trim()) {
+      setError("Relationship type is required");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      await onSubmit(from, to, type, properties, confidence);
+      // Clean up type string (e.g. "managed by" -> "MANAGED_BY")
+      const cleanType = type.trim().replace(/\s+/g, '_').toUpperCase(); 
+      
+      await onSubmit(
+          String(from), 
+          String(to), 
+          cleanType as RelationshipType, 
+          properties, 
+          confidence
+      );
     } catch (err: any) {
+      console.error("Save Error:", err);
       setError(err.message || "Failed to save relationship");
     } finally {
       setIsSubmitting(false);
@@ -77,32 +118,23 @@ export default function RelationshipForm({
 
   const handleAddProperty = () => {
     if (!newPropertyKey.trim()) return;
-
-    setProperties((prev) => ({
-      ...prev,
-      [newPropertyKey.trim()]: newPropertyValue,
-    }));
+    setProperties((prev) => ({ ...prev, [newPropertyKey.trim()]: newPropertyValue }));
     setNewPropertyKey("");
     setNewPropertyValue("");
   };
 
   const handleRemoveProperty = (key: string) => {
-    setProperties((prev) => {
-      const newProps = { ...prev };
-      delete newProps[key];
-      return newProps;
-    });
+    const newProps = { ...properties };
+    delete newProps[key];
+    setProperties(newProps);
   };
 
   const handlePropertyChange = (key: string, value: any) => {
-    setProperties((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
+    setProperties((prev) => ({ ...prev, [key]: value }));
   };
 
   const getEntityLabel = (id: string) => {
-    const entity = entities.find((e) => e.id === id);
+    const entity = entities.find((e) => String(e.id) === String(id));
     return entity ? `${entity.label} (${entity.type})` : id;
   };
 
@@ -114,11 +146,7 @@ export default function RelationshipForm({
           <h2 className="text-xl font-semibold">
             {relationship ? "Edit Relationship" : "Create Relationship"}
           </h2>
-          <button
-            onClick={onCancel}
-            className="p-1 hover:bg-gray-100 rounded"
-            disabled={isSubmitting}
-          >
+          <button onClick={onCancel} className="p-1 hover:bg-gray-100 rounded" disabled={isSubmitting}>
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -139,22 +167,18 @@ export default function RelationshipForm({
             <select
               value={from}
               onChange={(e) => setFrom(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
               required
               disabled={isSubmitting || !!relationship}
             >
               <option value="">Select source entity</option>
               {availableFromEntities.map((entity) => (
-                <option key={entity.id} value={entity.id}>
+                <option key={String(entity.id)} value={String(entity.id)}>
                   {entity.label} ({entity.type})
                 </option>
               ))}
             </select>
-            {from && (
-              <p className="mt-1 text-xs text-gray-500">
-                {getEntityLabel(from)}
-              </p>
-            )}
+            {from && <p className="mt-1 text-xs text-gray-500">{getEntityLabel(from)}</p>}
           </div>
 
           {/* To Entity */}
@@ -165,40 +189,43 @@ export default function RelationshipForm({
             <select
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
               required
               disabled={isSubmitting || !!relationship}
             >
               <option value="">Select target entity</option>
               {availableToEntities.map((entity) => (
-                <option key={entity.id} value={entity.id}>
+                <option key={String(entity.id)} value={String(entity.id)}>
                   {entity.label} ({entity.type})
                 </option>
               ))}
             </select>
-            {to && (
-              <p className="mt-1 text-xs text-gray-500">{getEntityLabel(to)}</p>
-            )}
+            {to && <p className="mt-1 text-xs text-gray-500">{getEntityLabel(to)}</p>}
           </div>
 
-          {/* Type */}
+          {/* Relationship Type (Updated Datalist) */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Relationship Type <span className="text-red-500">*</span>
             </label>
-            <select
+            <input
+              list="relationship-types-list" // Unique ID to avoid conflicts
               value={type}
-              onChange={(e) => setType(e.target.value as RelationshipType)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => setType(e.target.value)}
+              placeholder="Select or type custom..."
+              className="w-full px-3 py-2 border border-gray-300 rounded-md uppercase"
               required
               disabled={isSubmitting}
-            >
-              {RELATIONSHIP_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t.replace(/_/g, " ")}
-                </option>
+              autoComplete="off"
+            />
+            <datalist id="relationship-types-list">
+              {relationshipOptions.map((t) => (
+                <option key={t} value={t} />
               ))}
-            </select>
+            </datalist>
+            <p className="text-xs text-gray-500 mt-1">
+              Select a standard type or type your own (e.g., TEAM_LEAD).
+            </p>
           </div>
 
           {/* Confidence */}
@@ -220,11 +247,7 @@ export default function RelationshipForm({
 
           {/* Properties */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Properties
-            </label>
-
-            {/* Existing Properties */}
+            <label className="block text-sm font-medium text-gray-700 mb-2">Properties</label>
             <div className="space-y-2 mb-3">
               {Object.entries(properties).map(([key, value]) => (
                 <div key={key} className="flex items-center gap-2">
@@ -297,7 +320,7 @@ export default function RelationshipForm({
             type="submit"
             onClick={handleSubmit}
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isSubmitting || !from || !to || from === to}
+            disabled={isSubmitting || !from || !to || from === to || !type}
           >
             {isSubmitting ? "Saving..." : relationship ? "Update" : "Create"}
           </button>
@@ -306,4 +329,3 @@ export default function RelationshipForm({
     </div>
   );
 }
-
