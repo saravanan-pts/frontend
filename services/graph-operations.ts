@@ -8,6 +8,12 @@ const GRAPH_LIMITS = {
     MAX_EDGES: 100
 };
 
+// --- HELPER: STRIP PREFIXES TO GET CLEAN ID ---
+const cleanId = (id: string) => {
+    if (!id) return "";
+    return id.replace(/^(entity:|person:|organization:|location:)/, "").trim();
+};
+
 export class GraphOperations {
   private get db() {
     return surrealDB.getClient();
@@ -39,9 +45,11 @@ export class GraphOperations {
           const info = await this.db.query('INFO FOR DB');
           // @ts-ignore
           const tablesObject = info[0]?.result?.tables || {}; 
-          const allTableNames = Object.keys(tablesObject);
+          // FIX: Explicitly cast to string[] to satisfy TS
+          const allTableNames = Object.keys(tablesObject) as string[];
           
           const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
+          // FIX: Filter works now because we cast to string[]
           const edgeTables = allTableNames.filter(t => !exclude.includes(t));
 
           for (const table of edgeTables) {
@@ -68,16 +76,19 @@ export class GraphOperations {
       sql += ` LIMIT 20`; 
 
       const result = await this.db.query(sql, { query, typeFilter });
-      // @ts-ignore
-      const searchHits = (result[0]?.result || []).map(r => this.mapRecordToEntity(r));
+      // FIX: Cast result to any[] before mapping
+      const rawHits = (result[0] as any)?.result || [];
+      const searchHits = (Array.isArray(rawHits) ? rawHits : []).map((r: any) => this.mapRecordToEntity(r));
 
       if (searchHits.length === 0) return { entities: [], relationships: [] };
 
       const hitIds = searchHits.map((e: Entity) => e.id);
       const edgeQuery = `SELECT * FROM relationship WHERE in IN $ids OR out IN $ids LIMIT 100`;
       const edgeResult = await this.db.query(edgeQuery, { ids: hitIds });
-      // @ts-ignore
-      const relationships = (edgeResult[0]?.result || []).map(r => this.mapRecordToRelationship(r));
+      
+      // FIX: Cast result to any[]
+      const rawEdges = (edgeResult[0] as any)?.result || [];
+      const relationships = (Array.isArray(rawEdges) ? rawEdges : []).map((r: any) => this.mapRecordToRelationship(r));
 
       const neighborIds = new Set<string>();
       relationships.forEach((r: Relationship) => {
@@ -90,8 +101,9 @@ export class GraphOperations {
       if (missingIds.length > 0) {
           const neighborQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
           const neighborResult = await this.db.query(neighborQuery, { ids: missingIds });
-          // @ts-ignore
-          neighbors = (neighborResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
+          // FIX: Cast result to any[]
+          const rawNeighbors = (neighborResult[0] as any)?.result || [];
+          neighbors = (Array.isArray(rawNeighbors) ? rawNeighbors : []).map((r: any) => this.mapRecordToEntity(r));
       }
 
       return { entities: [...searchHits, ...neighbors], relationships: relationships };
@@ -118,8 +130,9 @@ export class GraphOperations {
         if (requiredIds.length > 0) {
             const nodeQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
             const nodeResult = await this.db.query(nodeQuery, { ids: requiredIds });
-            // @ts-ignore
-            criticalEntities = (nodeResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
+            // FIX: Cast result to any[]
+            const rawNodes = (nodeResult[0] as any)?.result || [];
+            criticalEntities = (Array.isArray(rawNodes) ? rawNodes : []).map((r: any) => this.mapRecordToEntity(r));
         }
 
         const remainingLimit = GRAPH_LIMITS.INITIAL_NODES - criticalEntities.length;
@@ -132,8 +145,9 @@ export class GraphOperations {
             fillerQuery += ` ORDER BY updatedAt DESC LIMIT ${remainingLimit}`;
             
             const fillerResult = await this.db.query(fillerQuery, { ids: requiredIds, documentId });
-            // @ts-ignore
-            fillerEntities = (fillerResult[0]?.result || []).map(r => this.mapRecordToEntity(r));
+            // FIX: Cast result to any[]
+            const rawFillers = (fillerResult[0] as any)?.result || [];
+            fillerEntities = (Array.isArray(rawFillers) ? rawFillers : []).map((r: any) => this.mapRecordToEntity(r));
         }
 
         return { entities: [...criticalEntities, ...fillerEntities], relationships: rels };
@@ -155,24 +169,82 @@ export class GraphOperations {
     } catch (error: any) { throw error; }
   }
 
+  // --- FIX 1: ROBUST UPDATE ENTITY ---
+  // Fixes the "Failed to save entity" 500 Error
   async updateEntity(id: string, updates: any): Promise<Entity> {
-    const result = await this.db.merge(id, updates);
-    return this.mapRecordToEntity(result);
+    try {
+      // 1. Normalize ID to ensure we target "entity:xyz"
+      const clean = cleanId(id);
+      const recordId = `${TABLES.ENTITY}:${clean}`;
+
+      // 2. Remove 'id' from the update payload
+      // SurrealDB throws an error if you try to "update" the immutable ID field
+      const { id: ignoredId, ...cleanUpdates } = updates;
+      
+      // 3. Add timestamp
+      cleanUpdates.updatedAt = new Date().toISOString();
+
+      console.log(`[GraphOps] Updating Entity: ${recordId}`, cleanUpdates);
+
+      const result = await this.db.merge(recordId, cleanUpdates);
+      return this.mapRecordToEntity(result);
+    } catch (e: any) {
+      console.error("[GraphOps] Update Entity Failed:", e);
+      throw new Error("Update failed: " + e.message);
+    }
   }
 
+  // --- FIX 2: ROBUST DELETE ENTITY ---
   async deleteEntity(id: string): Promise<void> {
-    try { await this.db.query(`DELETE FROM ${TABLES.RELATIONSHIP} WHERE from = $id OR to = $id`, { id }); } catch (e) {}
-    await this.db.delete(id);
+    try {
+      const clean = cleanId(id);
+      const recordId = `${TABLES.ENTITY}:${clean}`;
+
+      // 1. Delete connected edges first (cleanup)
+      await this.db.query(`DELETE FROM relationship WHERE from = $id OR to = $id`, { id: recordId });
+      
+      // 2. Delete the node
+      await this.db.delete(recordId);
+      console.log(`[GraphOps] Deleted Entity: ${recordId}`);
+    } catch (e) {
+      console.error("[GraphOps] Delete Entity Failed:", e);
+    }
   }
 
+  // --- ROBUST CREATE RELATIONSHIP (Already Fixed) ---
   async createRelationship(from: string, to: string, type: string, properties: any = {}, confidence: number = 1): Promise<Relationship> {
+      console.log(`[GraphOps] Creating Relationship: ${from} -> ${type} -> ${to}`);
+      
       const now = new Date().toISOString();
-      await this.db.query(`DEFINE TABLE IF NOT EXISTS ${type} SCHEMALESS PERMISSIONS FULL`);
-      const query = `RELATE $from->$type->$to CONTENT { confidence: $confidence, properties: $properties, createdAt: $createdAt }`;
-      const result = await this.db.query(query, { from, to, type, confidence, properties, createdAt: now });
-      // @ts-ignore
-      const record = result[0]?.result?.[0];
-      return this.mapRecordToRelationship(record);
+      const rawFrom = cleanId(from);
+      const rawTo = cleanId(to);
+      const relType = type.replace(/\s+/g, '_').toUpperCase();
+
+      await this.db.query(`DEFINE TABLE IF NOT EXISTS ${relType} SCHEMALESS PERMISSIONS FULL`);
+
+      const query = `
+        RELATE ${TABLES.ENTITY}:${rawFrom} -> ${relType} -> ${TABLES.ENTITY}:${rawTo}
+        CONTENT {
+          confidence: $confidence,
+          properties: $properties,
+          createdAt: $createdAt
+        }
+        RETURN *;
+      `;
+
+      try {
+        const result = await this.db.query(query, { confidence, properties, createdAt: now });
+        // @ts-ignore
+        const record = result[0]?.result?.[0];
+        
+        if (!record) {
+            throw new Error(`Database returned no result. Check if entities exist: ${rawFrom}, ${rawTo}`);
+        }
+        return this.mapRecordToRelationship(record);
+      } catch (e: any) {
+        console.error("[GraphOps] Create Relationship Failed:", e);
+        throw new Error("DB Error: " + e.message);
+      }
   }
 
   async updateRelationship(id: string, updates: any): Promise<Relationship> {
@@ -230,7 +302,9 @@ export class GraphOperations {
       const info = await this.db.query('INFO FOR DB');
       // @ts-ignore
       const tablesObject = info[0]?.result?.tables || {}; 
-      const allTableNames = Object.keys(tablesObject);
+      // FIX: Cast to string[] to allow .filter
+      const allTableNames = Object.keys(tablesObject) as string[];
+      
       const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
       const edgeTables = allTableNames.filter(t => !exclude.includes(t));
       if (edgeTables.length === 0) return [];
@@ -240,8 +314,10 @@ export class GraphOperations {
       query += ` ORDER BY createdAt DESC LIMIT ${GRAPH_LIMITS.MAX_EDGES}`; 
       
       const result = await this.db.query(query, { documentId });
-      // @ts-ignore
-      const records = result[0]?.result || [];
+      // FIX: Cast to any[] to allow .filter and .map
+      const rawRecords = (result[0] as any)?.result || [];
+      const records = Array.isArray(rawRecords) ? rawRecords : [];
+      
       const validEdges = records.filter((r: any) => (r.in && r.out) || (r.from && r.to));
       return validEdges.map((r: any) => this.mapRecordToRelationship(r));
     } catch (e) { return []; }
@@ -261,7 +337,6 @@ export class GraphOperations {
         filename: r.filename, 
         content: r.content, 
         fileType: r.fileType, 
-        // FIX: Fallback to createdAt if uploadedAt is missing to prevent frontend crashes
         uploadedAt: r.uploadedAt || r.createdAt || new Date().toISOString(), 
         processedAt: r.processedAt, 
         entityCount: r.entityCount, 
@@ -269,29 +344,18 @@ export class GraphOperations {
     }; 
   }
   
-  // --- FIX: FETCH FROM API ---
+  // --- FETCH DOCUMENTS ---
   async getAllDocuments(): Promise<Document[]> {
     try {
-      // 1. If running in the browser, fetch from the Next.js API
       if (typeof window !== 'undefined') {
         const response = await fetch('/api/documents');
         if (!response.ok) throw new Error("Failed to fetch documents");
         return await response.json();
       }
-
-      // 2. If running server-side, query DB directly
-      const result = await this.db.query(`
-        SELECT 
-          id, filename, fileType, entityCount, relationshipCount, 
-          createdAt, processedAt 
-        FROM document 
-        ORDER BY createdAt DESC
-      `);
-      
-      // @ts-ignore
-      const docs = result[0]?.result || [];
+      const result = await this.db.query(`SELECT id, filename, fileType, entityCount, relationshipCount, createdAt, processedAt FROM document ORDER BY createdAt DESC`);
+      const rawDocs = (result[0] as any)?.result || [];
+      const docs = Array.isArray(rawDocs) ? rawDocs : [];
       return docs.map((d: any) => this.mapRecordToDocument(d));
-
     } catch (e) {
       console.error("[GraphOps] Get Documents Error:", e);
       return [];

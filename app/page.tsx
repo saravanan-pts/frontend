@@ -421,7 +421,19 @@ export default function Home() {
         </div>
         
         {showEntityForm && <EntityForm entity={editingEntity || undefined} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
-        {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={entities} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
+        
+        {/* --- FIX APPLIED HERE: existingRelationships prop added --- */}
+        {showRelationshipForm && (
+            <RelationshipForm 
+                fromEntityId={relationshipFromId} 
+                toEntityId={relationshipToId} 
+                relationship={editingRelationship || undefined} 
+                entities={stableEntities} // Using stableEntities for performance
+                existingRelationships={stableRelationships} // <--- FIX: Passing existing data to dropdown
+                onSubmit={handleRelationshipSubmit} 
+                onCancel={() => setShowRelationshipForm(false)} 
+            />
+        )}
         
         {contextMenu && (
             <ContextMenu 
