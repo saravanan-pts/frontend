@@ -1,26 +1,56 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { X, Plus, Trash2 } from "lucide-react";
 import { ENTITY_TYPES } from "@/lib/schema";
-import type { Entity, EntityType } from "@/types";
+import type { Entity } from "@/types";
 
 interface EntityFormProps {
-  entity?: Entity; // If provided, form is in edit mode
-  onSubmit: (data: Omit<Entity, "id" | "createdAt" | "updatedAt">) => Promise<void>;
+  entity?: Entity;
+  existingTypes?: string[];
+  // FIX: We define the structure manually here to allow 'type' to be ANY string
+  // instead of strictly Omit<Entity...> which enforces the hardcoded enum.
+  onSubmit: (data: { 
+    label: string; 
+    type: string; 
+    properties: Record<string, any>; 
+    metadata?: Record<string, any> 
+  }) => Promise<void>;
   onCancel: () => void;
 }
 
-export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormProps) {
+export default function EntityForm({ 
+  entity, 
+  existingTypes = [], 
+  onSubmit, 
+  onCancel 
+}: EntityFormProps) {
+    
   const [label, setLabel] = useState(entity?.label || "");
-  const [type, setType] = useState<EntityType>(entity?.type || "Concept");
-  const [properties, setProperties] = useState<Record<string, any>>(
-    entity?.properties || {}
-  );
+  const [type, setType] = useState<string>(entity?.type || "Concept");
+  const [properties, setProperties] = useState<Record<string, any>>(entity?.properties || {});
+  
   const [newPropertyKey, setNewPropertyKey] = useState("");
   const [newPropertyValue, setNewPropertyValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // --- SMART DROPDOWN LOGIC ---
+  const typeOptions = useMemo(() => {
+    // 1. Start with Standard Defaults
+    const options = new Set<string>(ENTITY_TYPES);
+    
+    // 2. Add extra common business types
+    options.add("Vendor");
+    options.add("Project");
+    options.add("Asset");
+    options.add("Technology");
+
+    // 3. Add types already existing in the graph
+    existingTypes.forEach(t => options.add(t));
+
+    return Array.from(options).sort();
+  }, [existingTypes]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,9 +63,12 @@ export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormPro
 
     setIsSubmitting(true);
     try {
+      // Capitalize first letter (e.g. "vendor" -> "Vendor")
+      const formattedType = type.charAt(0).toUpperCase() + type.slice(1);
+
       await onSubmit({
         label: label.trim(),
-        type,
+        type: formattedType, 
         properties,
         metadata: entity?.metadata,
       });
@@ -48,11 +81,7 @@ export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormPro
 
   const handleAddProperty = () => {
     if (!newPropertyKey.trim()) return;
-
-    setProperties((prev) => ({
-      ...prev,
-      [newPropertyKey.trim()]: newPropertyValue,
-    }));
+    setProperties((prev) => ({ ...prev, [newPropertyKey.trim()]: newPropertyValue }));
     setNewPropertyKey("");
     setNewPropertyValue("");
   };
@@ -66,10 +95,7 @@ export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormPro
   };
 
   const handlePropertyChange = (key: string, value: any) => {
-    setProperties((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
+    setProperties((prev) => ({ ...prev, [key]: value }));
   };
 
   return (
@@ -80,11 +106,7 @@ export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormPro
           <h2 className="text-xl font-semibold">
             {entity ? "Edit Entity" : "Create Entity"}
           </h2>
-          <button
-            onClick={onCancel}
-            className="p-1 hover:bg-gray-100 rounded"
-            disabled={isSubmitting}
-          >
+          <button onClick={onCancel} className="p-1 hover:bg-gray-100 rounded" disabled={isSubmitting}>
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -113,31 +135,33 @@ export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormPro
             />
           </div>
 
-          {/* Type */}
+          {/* DYNAMIC TYPE INPUT */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Type <span className="text-red-500">*</span>
+              Type / Category <span className="text-red-500">*</span>
             </label>
-            <select
+            <input
+              list="entity-types-options" 
               value={type}
-              onChange={(e) => setType(e.target.value as EntityType)}
+              onChange={(e) => setType(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Select or type new..."
               required
               disabled={isSubmitting}
-            >
-              {ENTITY_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
+            />
+            <datalist id="entity-types-options">
+              {typeOptions.map((t) => (
+                <option key={t} value={t} />
               ))}
-            </select>
+            </datalist>
+            <p className="text-xs text-gray-500 mt-1">
+                Type a custom category (e.g. "Vendor") to create it.
+            </p>
           </div>
 
           {/* Properties */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Properties
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Properties</label>
 
             {/* Existing Properties */}
             <div className="space-y-2 mb-3">
@@ -221,4 +245,3 @@ export default function EntityForm({ entity, onSubmit, onCancel }: EntityFormPro
     </div>
   );
 }
-
