@@ -23,9 +23,10 @@ import type { Entity, Relationship } from "@/types";
 export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
   
-  // FIX: Added 'selectedEntity' here so we can use it as a fallback for creating relationships
+  // Store hooks
   const { activeTab, setActiveTab, setSelectedEntity, selectedEntity } = useGraphStore();
   
+  // Graph hooks
   const { 
     entities, 
     relationships, 
@@ -65,7 +66,7 @@ export default function Home() {
   const [selectedEntityFilters, setSelectedEntityFilters] = useState<string[]>([]);
   const [selectedRelFilters, setSelectedRelFilters] = useState<string[]>([]);
 
-  // STOP INFINITE RELOADS: Use JSON.stringify for stable dependency comparison
+  // Memoized data for stability
   const stableEntities = useMemo(() => entities, [JSON.stringify(entities)]);
   const stableRelationships = useMemo(() => relationships, [JSON.stringify(relationships)]);
 
@@ -239,21 +240,16 @@ export default function Home() {
       } catch (e) { toast.error("Failed to delete relationship"); }
   };
 
-  // --- CRITICAL FIX: Robust "Create Relationship" Handler ---
-  // Handles: Context Menu click, Details Panel Button click, and Direct calls
   const handleCreateRelationship = (arg?: string | unknown) => { 
       setEditingRelationship(null); 
       let fromId: string | undefined = undefined;
 
-      // 1. Check if a string ID was passed directly (Context menu often does this)
       if (typeof arg === 'string') {
           fromId = arg;
       } 
-      // 2. Check if triggered from Context Menu state
       else if (contextMenu?.nodeId) {
           fromId = contextMenu.nodeId;
       }
-      // 3. Fallback: Check if an entity is currently selected (Details Panel button)
       else if (selectedEntity) {
           fromId = selectedEntity.id;
       }
@@ -421,16 +417,23 @@ export default function Home() {
            </div>
         </div>
         
-        {showEntityForm && <EntityForm entity={editingEntity || undefined} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
+        {/* --- FIXED: ENTITY FORM WITH DYNAMIC TYPES --- */}
+        {showEntityForm && (
+            <EntityForm 
+                entity={editingEntity || undefined} 
+                existingTypes={allEntityTypes} // Pass existing types to dropdown
+                onSubmit={handleEntitySubmit} 
+                onCancel={() => setShowEntityForm(false)} 
+            />
+        )}
         
-        {/* --- FIX APPLIED HERE: existingRelationships prop added --- */}
         {showRelationshipForm && (
             <RelationshipForm 
                 fromEntityId={relationshipFromId} 
                 toEntityId={relationshipToId} 
                 relationship={editingRelationship || undefined} 
-                entities={stableEntities} // Using stableEntities for performance
-                existingRelationships={stableRelationships} // <--- FIX: Passing existing data to dropdown
+                entities={stableEntities} 
+                existingRelationships={stableRelationships} 
                 onSubmit={handleRelationshipSubmit} 
                 onCancel={() => setShowRelationshipForm(false)} 
             />
@@ -444,11 +447,9 @@ export default function Home() {
                 onCreateNode={handleCreateNode} 
                 onEditNode={() => handleEditNode(contextMenu.nodeId)} 
                 onDeleteNode={() => handleDeleteNode(contextMenu.nodeId)} 
-                
                 onCreateRelationship={() => handleCreateRelationship(contextMenu.nodeId)} 
                 onEditEdge={() => handleEditRelationship(contextMenu.edgeId)} 
                 onDeleteEdge={() => handleDeleteRelationship(contextMenu.edgeId)} 
-                
                 onClose={() => setContextMenu(null)} 
             />
         )}
