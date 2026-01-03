@@ -78,7 +78,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                   },
                   "label": (ele: NodeSingular) => {
                     const type = ele.data("type");
-                    // FIX: Cast type to string to prevent TS Enum error
                     if ((type as string) === 'Community') return ''; 
                     return ele.data("label") || ele.data("id");
                   },
@@ -100,7 +99,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 },
               },
               {
-                // FIX: Quote the value properly in selector if possible, or rely on cast in logic above
                 selector: "node[type='Community']",
                 style: {
                   "background-color": "#f3f4f6", "background-opacity": 0.5,
@@ -117,8 +115,10 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                   "label": "data(type)", "font-size": "8px", "text-rotation": "autorotate"
                 }
               },
+              // --- UPDATED VISIBILITY STYLES ---
               { 
-                selector: ".hidden", 
+                // Hide if filtered by checkbox OR hidden by search
+                selector: ".filtered, .search-hidden", 
                 style: { 
                   "display": "none" 
                 } 
@@ -146,9 +146,9 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             if (!cy) return;
 
             cy.batch(() => {
-                cy.elements().removeClass("hidden").removeClass("highlighted");
+                cy.elements().removeClass("search-hidden").removeClass("highlighted");
                 const neighborhood = node.neighborhood().add(node);
-                cy.elements().not(neighborhood).addClass("hidden");
+                cy.elements().not(neighborhood).addClass("search-hidden");
                 node.addClass("highlighted");
             });
 
@@ -168,7 +168,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 const cy = cyRef.current;
                 if(cy) {
                     cy.batch(() => {
-                        cy.elements().removeClass("hidden").removeClass("highlighted");
+                        cy.elements().removeClass("search-hidden").removeClass("highlighted");
                     });
                     cy.animate({
                         fit: { eles: cy.elements(), padding: 20 },
@@ -181,7 +181,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         cyRef.current.on("cxttap", (evt) => {
             const oe = evt.originalEvent as MouseEvent;
             const target = evt.target === cyRef.current ? "canvas" : (evt.target.isNode() ? "node" : "edge");
-            // @ts-ignore - id() is a valid Cytoscape method but sometimes missing in strict types
+            // @ts-ignore
             onContextMenu?.(oe.clientX, oe.clientY, target, evt.target.id?.(), evt.target.id?.());
         });
 
@@ -202,18 +202,15 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             cy.elements().remove(); 
 
             // --- CRITICAL FIX: Cast everything to string ---
-            // This prevents mismatch errors between number/string IDs
             const parentMap = new Map<string, string>(); 
             const communityIds = new Set(entities.filter(e => (e.type as string) === "Community").map(e => String(e.id)));
 
             relationships.forEach(rel => {
-                // Fix: Cast types to string to avoid mismatch errors
                 if ((rel.type as string) === "BELONGS_TO" && communityIds.has(String(rel.to))) {
                     parentMap.set(String(rel.from), String(rel.to));
                 }
             });
 
-            // 1. Prepare Nodes (Ensure ID is string)
             const nodes = entities.map(e => ({
                 group: "nodes",
                 data: { 
@@ -227,12 +224,10 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
 
             const validIds = new Set(nodes.map(n => n.data.id));
             
-            // 2. Prepare Edges (Ensure IDs are strings & check validity)
             const edges = relationships
                 .filter(r => {
                     const fromId = String(r.from);
                     const toId = String(r.to);
-                    // Only draw edge if both nodes exist
                     return validIds.has(fromId) && validIds.has(toId);
                 })
                 .filter(r => (r.type as string) !== "BELONGS_TO") 
@@ -249,7 +244,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             cy.add([...nodes, ...edges] as any);
         });
 
-        // Use original layout settings to prevent "linear line" issue
         cy.layout({ 
             name: 'fcose', 
             animate: true, 
@@ -270,10 +264,13 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         if (!cyRef.current) return;
         const cy = cyRef.current;
         cy.batch(() => {
-          cy.nodes().removeClass("hidden");
+          // 1. Reset ONLY the filter class (leave search results alone)
+          cy.nodes().removeClass("filtered");
+          
+          // 2. Hide nodes that are NOT in the visible list
           if (visibleTypes.length > 0) {
-             const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
-             cy.nodes(selector).addClass("hidden");
+            const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
+            cy.nodes(selector).addClass("filtered");
           }
         });
       },
@@ -282,11 +279,14 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         if (!cyRef.current) return;
         const cy = cyRef.current;
         cy.batch(() => {
-           cy.edges().addClass("hidden");
-           if (visibleTypes.length > 0) {
-              const selector = visibleTypes.map(t => `[type = "${t}"]`).join(", ");
-              cy.edges(selector).removeClass("hidden");
-           }
+          // 1. Mark ALL edges as filtered (Hidden)
+          cy.edges().addClass("filtered");
+
+          // 2. Un-mark (Show) only the ones in the visible list
+          if (visibleTypes.length > 0) {
+            const selector = visibleTypes.map(t => `[type = "${t}"]`).join(", ");
+            cy.edges(selector).removeClass("filtered");
+          }
         });
       },
 
@@ -305,8 +305,9 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
       fit: () => cyRef.current?.fit(),
       
       resetZoom: () => {
-          cyRef.current?.elements().removeClass("hidden").removeClass("highlighted");
-          cyRef.current?.fit();
+        // Only remove search-related classes. Keep .filtered active.
+        cyRef.current?.elements().removeClass("search-hidden").removeClass("highlighted");
+        cyRef.current?.fit();
       },
       
       zoomIn: () => {
@@ -323,17 +324,25 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         const term = query.toLowerCase().trim();
 
         cy.batch(() => {
-            cy.elements().removeClass("hidden").removeClass("highlighted");
+            // 1. Reset ONLY search classes (keep filter choices active)
+            cy.elements().removeClass("search-hidden").removeClass("highlighted");
+
             if (!term) { cy.fit(); return; }
 
+            // 2. Find Matches
             const matches = cy.nodes().filter((node) => {
                 const d = node.data();
                 return (d.label || "").toLowerCase().includes(term) || (d.type || "").toLowerCase().includes(term);
             });
 
             if (matches.length === 0) return;
+
+            // 3. Calculate Neighborhood
             const neighborhood = matches.neighborhood().add(matches);
-            cy.elements().not(neighborhood).addClass("hidden");
+
+            // 4. Hide everything NOT in the neighborhood using .search-hidden
+            cy.elements().not(neighborhood).addClass("search-hidden");
+            
             matches.addClass("highlighted");
             cy.fit(neighborhood, 50);
         });

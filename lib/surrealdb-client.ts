@@ -246,6 +246,31 @@ class SurrealDBClient {
   getConnectionStatus(): boolean {
     return this.isConnected;
   }
+
+  // --- NEW METHODS REQUIRED FOR PAGE.TSX ---
+  
+  /**
+   * Directly execute a query on the underlying SurrealDB instance.
+   */
+  async query(sql: string, vars?: Record<string, unknown>) {
+    // Attempt auto-reconnect if needed
+    if (!this.db || !this.isConnected) {
+        await this.connect();
+    }
+    if (!this.db) throw new Error("Database not connected");
+    return this.db.query(sql, vars);
+  }
+
+  /**
+   * Switch namespace and database.
+   */
+  async use(config: { ns: string; db: string }) {
+    if (!this.db || !this.isConnected) {
+        await this.connect();
+    }
+    if (!this.db) throw new Error("Database not connected");
+    return this.db.use(config);
+  }
 }
 
 // Export singleton instance

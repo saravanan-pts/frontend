@@ -17,6 +17,7 @@ import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
 import { useGraph } from "@/hooks/useGraph";
 import { useSurrealDB } from "@/hooks/useSurrealDB";
+import { surrealDB } from "@/lib/surrealdb-client"; 
 import { Upload, FileText, Info, Settings, RefreshCw, Trash2 } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
 
@@ -51,6 +52,12 @@ export default function Home() {
   // UI State
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true); 
 
+  // --- NEW: NAMESPACE & DATABASE STATE ---
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [selectedNamespace, setSelectedNamespace] = useState<string>("");
+  const [selectedDatabase, setSelectedDatabase] = useState<string>("");
+
   // Modal states
   const [showEntityForm, setShowEntityForm] = useState(false);
   const [editingEntity, setEditingEntity] = useState<Entity | null>(null);
@@ -70,6 +77,74 @@ export default function Home() {
   const stableEntities = useMemo(() => entities, [JSON.stringify(entities)]);
   const stableRelationships = useMemo(() => relationships, [JSON.stringify(relationships)]);
 
+  // --- DEBUG VERSION: FETCH NAMESPACES ---
+  const fetchNamespaces = async () => {
+    try {
+        console.log("DEBUG: Attempting to fetch namespaces..."); 
+        const result = await surrealDB.query("INFO FOR ROOT;");
+        console.log("DEBUG: Raw Namespace Result:", result); 
+        
+        // Robust check for different response structures
+        if (Array.isArray(result) && result[0]?.result?.namespaces) {
+            const nsList = Object.keys(result[0].result.namespaces);
+            console.log("DEBUG: Parsed Namespaces (Standard):", nsList);
+            setNamespaces(nsList);
+        } else if (result && (result as any).namespaces) {
+            // Some client versions return the result object directly
+            const nsList = Object.keys((result as any).namespaces);
+            console.log("DEBUG: Parsed Namespaces (Direct):", nsList);
+            setNamespaces(nsList);
+        } else {
+            console.warn("DEBUG: Unexpected response structure. See 'Raw Namespace Result' above.");
+        }
+    } catch (e) { 
+        console.error("DEBUG: CRITICAL ERROR fetching namespaces:", e); 
+        toast.error("Failed to load namespaces. Check console.");
+    }
+  };
+
+  // --- FETCH DATABASES (Dependent on Namespace) ---
+  const fetchDatabases = async (ns: string) => {
+    if (!ns) { setDatabases([]); return; }
+    try {
+        console.log(`DEBUG: Fetching DBs for namespace: ${ns}`);
+        const result = await surrealDB.query(`USE NS ${ns}; INFO FOR NS;`);
+        console.log("DEBUG: Raw Database Result:", result);
+
+        if (Array.isArray(result) && result[1]?.result?.databases) {
+            const dbList = Object.keys(result[1].result.databases);
+            setDatabases(dbList);
+        }
+    } catch (e) { 
+        console.error("Failed to fetch databases", e); 
+    }
+  };
+
+  // --- DROPDOWN HANDLERS ---
+  const handleNamespaceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const newNs = e.target.value;
+      setSelectedNamespace(newNs);
+      setSelectedDatabase(""); 
+      setDatabases([]);        
+      if(newNs) fetchDatabases(newNs);
+  };
+
+  const handleDatabaseChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const newDb = e.target.value;
+      setSelectedDatabase(newDb);
+      
+      if (selectedNamespace && newDb) {
+          try {
+              await surrealDB.use({ ns: selectedNamespace, db: newDb });
+              toast.success(`Switched to ${newDb}`);
+              fetchDocuments();
+          } catch (error) {
+              console.error("Failed to switch DB", error);
+              toast.error("Failed to switch database");
+          }
+      }
+  };
+
   const fetchDocuments = async () => {
     try {
       const res = await fetch("/api/documents");
@@ -82,18 +157,19 @@ export default function Home() {
     }
   };
 
-  // 1. Initial Data Load
+  // 1. Initial Data Load & Namespace Fetch
   useEffect(() => {
     const init = async () => {
       try { 
         await fetchDocuments();
         await loadGraph(selectedDocumentId || null); 
+        if (isConnected) fetchNamespaces();
       } 
       catch (e) { console.error("Initialization error:", e); } 
       finally { setIsInitialLoad(false); }
     };
     init();
-  }, [loadGraph]);
+  }, [loadGraph, isConnected]);
 
   // 2. Reload when Document Changes
   useEffect(() => {
@@ -116,7 +192,7 @@ export default function Home() {
     }
   }, [entities, relationships]);
 
-  // 4. Apply Filters
+  // 4. Apply Filters (WITH RELATIONSHIP FIX)
   useEffect(() => {
       if (graphRef.current) {
           graphRef.current.filterByType(selectedEntityFilters);
@@ -291,6 +367,7 @@ export default function Home() {
      if(graphRef.current) graphRef.current.fit();
      fetchDocuments();
      loadGraph(selectedDocumentId);
+     if (isConnected) fetchNamespaces(); 
   };
 
   const handleContextMenu = (x: number, y: number, target: ContextMenuTarget, nodeId?: string, edgeId?: string) => setContextMenu({ x, y, target, nodeId, edgeId });
@@ -331,15 +408,43 @@ export default function Home() {
               <div className="flex items-center gap-3">
                  <h2 className="text-xl font-semibold text-gray-800">Knowledge Graph POC</h2>
                  <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
-                 <div className={`w-3 h-3 rounded-full ${entities.length > 0 ? "bg-green-500" : "bg-gray-400"}`} />
+                 <div className={`w-3 h-3 rounded-full ${isConnected ? "bg-green-500" : "bg-gray-400"}`} title={isConnected ? "Connected" : "Disconnected"} />
               </div>
               <div className="text-sm text-gray-600">{entities.length} entities, {relationships.length} relationships</div>
            </header>
 
            <div className="flex-1 flex flex-row overflow-hidden bg-gray-50">
              <div className="flex-1 flex flex-col min-w-0">
-               <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end">
+               <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end gap-3">
                  
+                 {/* --- 1. NAMESPACE DROPDOWN --- */}
+                 <select
+                    value={selectedNamespace}
+                    onChange={handleNamespaceChange}
+                    className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px]"
+                 >
+                    <option value="">Select NS</option>
+                    {namespaces.map(ns => (
+                        <option key={ns} value={ns}>{ns}</option>
+                    ))}
+                 </select>
+
+                 {/* --- 2. DATABASE DROPDOWN --- */}
+                 <select
+                    value={selectedDatabase}
+                    onChange={handleDatabaseChange}
+                    disabled={!selectedNamespace}
+                    className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px] disabled:bg-gray-100 disabled:text-gray-400"
+                 >
+                    <option value="">Select DB</option>
+                    {databases.map(db => (
+                        <option key={db} value={db}>{db}</option>
+                    ))}
+                 </select>
+
+                 <div className="h-6 w-px bg-gray-300 mx-1"></div>
+                 
+                 {/* --- 3. EXISTING FILE DROPDOWN --- */}
                  <div className="flex items-center gap-2 max-w-md w-full">
                     <select
                         value={selectedDocumentId || ""}
@@ -417,11 +522,10 @@ export default function Home() {
            </div>
         </div>
         
-        {/* --- FIXED: ENTITY FORM WITH DYNAMIC TYPES --- */}
         {showEntityForm && (
             <EntityForm 
                 entity={editingEntity || undefined} 
-                existingTypes={allEntityTypes} // Pass existing types to dropdown
+                existingTypes={allEntityTypes} 
                 onSubmit={handleEntitySubmit} 
                 onCancel={() => setShowEntityForm(false)} 
             />
