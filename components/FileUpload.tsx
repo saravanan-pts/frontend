@@ -8,6 +8,8 @@ import toast from "react-hot-toast";
 
 const MAX_FILE_SIZE_MB = 10;
 const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
+const CHUNK_SIZE = 90; // Safe limit (Under the Backend's 100 row limit)
+
 const ACCEPTED_TYPES = {
   "text/plain": [".txt"],
   "application/pdf": [".pdf"],
@@ -52,9 +54,57 @@ function FileUpload() {
             return updated;
           });
 
-          const result = await processFile(file);
+          // --- SMART CHUNKING LOGIC ---
+          let totalEntities = 0;
+          let totalRels = 0;
+          const isTextOrCsv = file.type === "text/plain" || file.type === "text/csv" || file.name.endsWith('.csv') || file.name.endsWith('.txt');
 
-          // Update status to success
+          if (isTextOrCsv) {
+             const text = await file.text();
+             // Split by newline and remove empty lines
+             const lines = text.split('\n').filter(l => l.trim().length > 0);
+
+             if (lines.length > CHUNK_SIZE) {
+                 const header = lines[0]; // Assume 1st row is header
+                 const dataRows = lines.slice(1);
+                 const totalChunks = Math.ceil(dataRows.length / CHUNK_SIZE);
+                 
+                 toast.loading(`Large file detected. Splitting into ${totalChunks} parts...`, { duration: 3000 });
+
+                 // Loop through data in chunks
+                 for (let i = 0; i < dataRows.length; i += CHUNK_SIZE) {
+                     const chunkRows = dataRows.slice(i, i + CHUNK_SIZE);
+                     
+                     // Prepend header to every chunk so backend knows columns
+                     const chunkContent = [header, ...chunkRows].join('\n');
+                     
+                     // Create a virtual file for this chunk
+                     const partNumber = Math.floor(i / CHUNK_SIZE) + 1;
+                     const chunkFile = new File(
+                        [chunkContent], 
+                        `${file.name.replace('.csv','').replace('.txt','')}_part${partNumber}.csv`, 
+                        { type: file.type }
+                     );
+
+                     // Process this chunk
+                     const result = await processFile(chunkFile);
+                     totalEntities += (result?.entities?.length || 0);
+                     totalRels += (result?.relationships?.length || 0);
+                 }
+             } else {
+                 // File is small, process normally
+                 const result = await processFile(file);
+                 totalEntities = result?.entities?.length || 0;
+                 totalRels = result?.relationships?.length || 0;
+             }
+          } else {
+             // PDF/DOCX (Cannot be chunked easily on frontend, send as is)
+             const result = await processFile(file);
+             totalEntities = result?.entities?.length || 0;
+             totalRels = result?.relationships?.length || 0;
+          }
+
+          // Update status to success with AGGREGATED totals
           setFiles((prev) => {
             const updated = [...prev];
             const fileIndex = updated.findIndex((f) => f.name === file.name);
@@ -63,8 +113,8 @@ function FileUpload() {
                 ...updated[fileIndex],
                 status: "success",
                 result: {
-                  entities: result.entities.length,
-                  relationships: result.relationships.length,
+                  entities: totalEntities,
+                  relationships: totalRels,
                 },
               };
             }
@@ -72,7 +122,7 @@ function FileUpload() {
           });
 
           toast.success(
-            `Processed ${file.name}: ${result.entities.length} entities, ${result.relationships.length} relationships`
+            `Processed ${file.name}: ${totalEntities} entities, ${totalRels} relationships`
           );
         } catch (err: any) {
           setFiles((prev) => {

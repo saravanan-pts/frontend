@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useImperativeHandle, forwardRef, memo } from "react";
-import cytoscape, { Core, NodeSingular } from "cytoscape";
+import cytoscape, { Core, NodeSingular, EdgeSingular } from "cytoscape";
 import cola from "cytoscape-cola";
 import dagre from "cytoscape-dagre";
 import fcose from "cytoscape-fcose";
@@ -16,6 +16,29 @@ if (typeof window !== "undefined") {
     console.warn("Cytoscape extensions already registered");
   }
 }
+
+// --- STRICT COLOR PALETTE ---
+const getEntityColor = (type: string) => {
+    const t = (type || "Concept");
+    
+    // 1. Time/Date: Grey (Requested)
+    if (t === "Time" || t === "Date") return "#6b7280"; 
+    
+    // 2. Location: Yellow (Updated to specific hex)
+    if (t === "Location" || t === "Region") return "#F8AE25"; 
+    
+    // 3. Events: Orange (Requested)
+    if (t === "Event" || t === "Activity") return "#f97316"; 
+    
+    // 4. People: Blue (Requested)
+    if (t === "Person" || t === "Agent") return "#3b82f6"; 
+
+    // 5. Organization: Green (Requested)
+    if (t === "Organization" || t === "Company" || t === "Department") return "#10b981";
+    
+    // 6. Concepts: Purple (Requested)
+    return "#8b5cf6"; 
+};
 
 export interface GraphVisualizationRef {
   addNode: (entity: Entity) => void;
@@ -58,13 +81,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
     useEffect(() => {
       if (!containerRef.current) return;
 
-      const entityColors: Record<string, string> = {
-          Person: "#3b82f6", Organization: "#10b981", Location: "#f59e0b",
-          Concept: "#8b5cf6", Technology: "#06b6d4",
-          Event: "#ef4444", Activity: "#ef4444", Transaction: "#f97316",
-          Community: "#e0e7ff"
-      };
-
       try {
         cyRef.current = cytoscape({
           container: containerRef.current,
@@ -73,29 +89,27 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 selector: "node",
                 style: {
                   "background-color": (ele: NodeSingular) => {
-                    const type = ele.data("type") || "Concept";
-                    return entityColors[type] || "#6b7280";
+                    return getEntityColor(ele.data("type"));
                   },
                   "label": (ele: NodeSingular) => {
                     const type = ele.data("type");
                     if ((type as string) === 'Community') return ''; 
                     return ele.data("label") || ele.data("id");
                   },
-                  
-                  // --- FIXED CIRCLE SIZE ---
                   "shape": "ellipse",
-                  "width": "60px",   
-                  "height": "60px", 
+                  // Events are bigger
+                  "width": (ele: any) => (ele.data("type") === 'Event' ? "80px" : "60px"),   
+                  "height": (ele: any) => (ele.data("type") === 'Event' ? "80px" : "60px"), 
                   "padding": "0px",
-                  
-                  // --- TEXT WRAPPING ---
                   "text-wrap": "wrap",
                   "text-max-width": "55px", 
                   "font-size": "9px",
                   "color": "#fff",
                   "text-valign": "center", 
                   "text-halign": "center",
-                  "text-justification": "center"
+                  "text-justification": "center",
+                  "text-outline-width": 1.5,
+                  "text-outline-color": "#555"
                 },
               },
               {
@@ -110,18 +124,28 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
               {
                 selector: "edge",
                 style: {
-                  "width": 1.5, "line-color": "#cbd5e1", "target-arrow-color": "#cbd5e1",
-                  "target-arrow-shape": "triangle", "curve-style": "bezier",
-                  "label": "data(type)", "font-size": "8px", "text-rotation": "autorotate"
+                  "width": (ele: EdgeSingular) => {
+                     const type = ele.data("type");
+                     return (type === 'NEXT' || type === 'Sequence') ? 3 : 1.5;
+                  },
+                  "line-color": (ele: EdgeSingular) => {
+                     const type = ele.data("type");
+                     return (type === 'NEXT' || type === 'Sequence') ? "#3b82f6" : "#cbd5e1";
+                  },
+                  "target-arrow-color": (ele: EdgeSingular) => {
+                     const type = ele.data("type");
+                     return (type === 'NEXT' || type === 'Sequence') ? "#3b82f6" : "#cbd5e1";
+                  },
+                  "target-arrow-shape": "triangle", 
+                  "curve-style": "bezier",
+                  "label": "data(type)", 
+                  "font-size": "8px", 
+                  "text-rotation": "autorotate"
                 }
               },
-              // --- UPDATED VISIBILITY STYLES ---
               { 
-                // Hide if filtered by checkbox OR hidden by search
-                selector: ".filtered, .search-hidden", 
-                style: { 
-                  "display": "none" 
-                } 
+                selector: ".hidden", 
+                style: { "display": "none" } 
               },
               { 
                 selector: ".highlighted", 
@@ -146,9 +170,9 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             if (!cy) return;
 
             cy.batch(() => {
-                cy.elements().removeClass("search-hidden").removeClass("highlighted");
+                cy.elements().removeClass("hidden").removeClass("highlighted");
                 const neighborhood = node.neighborhood().add(node);
-                cy.elements().not(neighborhood).addClass("search-hidden");
+                cy.elements().not(neighborhood).addClass("hidden");
                 node.addClass("highlighted");
             });
 
@@ -168,12 +192,9 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 const cy = cyRef.current;
                 if(cy) {
                     cy.batch(() => {
-                        cy.elements().removeClass("search-hidden").removeClass("highlighted");
+                        cy.elements().removeClass("hidden").removeClass("highlighted");
                     });
-                    cy.animate({
-                        fit: { eles: cy.elements(), padding: 20 },
-                        duration: 500
-                    } as any);
+                    cy.animate({ fit: { eles: cy.elements(), padding: 20 }, duration: 500 } as any);
                 }
             } 
         });
@@ -201,7 +222,6 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         cy.batch(() => {
             cy.elements().remove(); 
 
-            // --- CRITICAL FIX: Cast everything to string ---
             const parentMap = new Map<string, string>(); 
             const communityIds = new Set(entities.filter(e => (e.type as string) === "Community").map(e => String(e.id)));
 
@@ -264,14 +284,11 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         if (!cyRef.current) return;
         const cy = cyRef.current;
         cy.batch(() => {
-          // 1. Reset ONLY the filter class (leave search results alone)
-          cy.nodes().removeClass("filtered");
-          
-          // 2. Hide nodes that are NOT in the visible list
-          if (visibleTypes.length > 0) {
-            const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
-            cy.nodes(selector).addClass("filtered");
-          }
+            cy.nodes().removeClass("hidden");
+            if (visibleTypes.length > 0) {
+              const selector = visibleTypes.map(t => `[type != "${t}"]`).join("");
+              cy.nodes(selector).addClass("hidden");
+            }
         });
       },
 
@@ -279,14 +296,11 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         if (!cyRef.current) return;
         const cy = cyRef.current;
         cy.batch(() => {
-          // 1. Mark ALL edges as filtered (Hidden)
-          cy.edges().addClass("filtered");
-
-          // 2. Un-mark (Show) only the ones in the visible list
-          if (visibleTypes.length > 0) {
-            const selector = visibleTypes.map(t => `[type = "${t}"]`).join(", ");
-            cy.edges(selector).removeClass("filtered");
-          }
+            cy.edges().addClass("hidden");
+            if (visibleTypes.length > 0) {
+              const selector = visibleTypes.map(t => `[type = "${t}"]`).join(", ");
+              cy.edges(selector).removeClass("hidden");
+            }
         });
       },
 
@@ -305,9 +319,8 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
       fit: () => cyRef.current?.fit(),
       
       resetZoom: () => {
-        // Only remove search-related classes. Keep .filtered active.
-        cyRef.current?.elements().removeClass("search-hidden").removeClass("highlighted");
-        cyRef.current?.fit();
+          cyRef.current?.elements().removeClass("hidden").removeClass("highlighted");
+          cyRef.current?.fit();
       },
       
       zoomIn: () => {
@@ -324,25 +337,17 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         const term = query.toLowerCase().trim();
 
         cy.batch(() => {
-            // 1. Reset ONLY search classes (keep filter choices active)
-            cy.elements().removeClass("search-hidden").removeClass("highlighted");
-
+            cy.elements().removeClass("hidden").removeClass("highlighted");
             if (!term) { cy.fit(); return; }
 
-            // 2. Find Matches
             const matches = cy.nodes().filter((node) => {
                 const d = node.data();
                 return (d.label || "").toLowerCase().includes(term) || (d.type || "").toLowerCase().includes(term);
             });
 
             if (matches.length === 0) return;
-
-            // 3. Calculate Neighborhood
             const neighborhood = matches.neighborhood().add(matches);
-
-            // 4. Hide everything NOT in the neighborhood using .search-hidden
-            cy.elements().not(neighborhood).addClass("search-hidden");
-            
+            cy.elements().not(neighborhood).addClass("hidden");
             matches.addClass("highlighted");
             cy.fit(neighborhood, 50);
         });

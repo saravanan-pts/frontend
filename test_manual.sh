@@ -6,7 +6,7 @@
 
 
 
-FILES=(/home/ubuntu/irmai-fresh-ui/demo.csv)
+FILES=(/home/ubuntu/latest2/Sample_Data.CSV)
 
 
 

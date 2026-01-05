@@ -2,16 +2,16 @@ import { surrealDB } from "@/lib/surrealdb-client";
 import { TABLES } from "@/lib/schema";
 import type { Entity, Relationship, Document } from "@/types";
 
-// PERFORMANCE CONFIGURATION
+// --- PERFORMANCE CONFIGURATION (INCREASED LIMITS) ---
 const GRAPH_LIMITS = {
-    INITIAL_NODES: 100, 
-    MAX_EDGES: 100
+  INITIAL_NODES: 1000, // Fetch more nodes to ensure density
+  MAX_EDGES: 5000      // Fetch WAY more edges to ensure connections exist
 };
 
 // --- HELPER: STRIP PREFIXES TO GET CLEAN ID ---
 const cleanId = (id: string) => {
-    if (!id) return "";
-    return id.replace(/^(entity:|person:|organization:|location:)/, "").trim();
+  if (!id) return "";
+  return id.replace(/^(entity:|person:|organization:|location:)/, "").trim();
 };
 
 export class GraphOperations {
@@ -45,11 +45,9 @@ export class GraphOperations {
           const info = await this.db.query('INFO FOR DB');
           // @ts-ignore
           const tablesObject = info[0]?.result?.tables || {}; 
-          // FIX: Explicitly cast to string[] to satisfy TS
           const allTableNames = Object.keys(tablesObject) as string[];
           
           const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
-          // FIX: Filter works now because we cast to string[]
           const edgeTables = allTableNames.filter(t => !exclude.includes(t));
 
           for (const table of edgeTables) {
@@ -76,18 +74,29 @@ export class GraphOperations {
       sql += ` LIMIT 20`; 
 
       const result = await this.db.query(sql, { query, typeFilter });
-      // FIX: Cast result to any[] before mapping
       const rawHits = (result[0] as any)?.result || [];
       const searchHits = (Array.isArray(rawHits) ? rawHits : []).map((r: any) => this.mapRecordToEntity(r));
 
       if (searchHits.length === 0) return { entities: [], relationships: [] };
 
       const hitIds = searchHits.map((e: Entity) => e.id);
-      const edgeQuery = `SELECT * FROM relationship WHERE in IN $ids OR out IN $ids LIMIT 100`;
-      const edgeResult = await this.db.query(edgeQuery, { ids: hitIds });
       
-      // FIX: Cast result to any[]
-      const rawEdges = (edgeResult[0] as any)?.result || [];
+      // FIX: Fetch generic relationships connected to these IDs
+      // We query the generic 'relationship' if possible, or fall back to known tables logic
+      // For searching, we might need a specific strategy, but let's try broadly:
+      const edgeQuery = `SELECT * FROM relationship WHERE in IN $ids OR out IN $ids LIMIT 500`;
+      
+      let rawEdges: any[] = [];
+      try {
+          const edgeResult = await this.db.query(edgeQuery, { ids: hitIds });
+          rawEdges = (edgeResult[0] as any)?.result || [];
+      } catch(e) {
+          // If generic 'relationship' table access fails, we might need to query specific tables
+          // But usually 'relationship' works as a super-table query in strict mode? 
+          // If not, we rely on the main graph load.
+          console.warn("Search edge fetch failed, returning nodes only.");
+      }
+      
       const relationships = (Array.isArray(rawEdges) ? rawEdges : []).map((r: any) => this.mapRecordToRelationship(r));
 
       const neighborIds = new Set<string>();
@@ -101,7 +110,6 @@ export class GraphOperations {
       if (missingIds.length > 0) {
           const neighborQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
           const neighborResult = await this.db.query(neighborQuery, { ids: missingIds });
-          // FIX: Cast result to any[]
           const rawNeighbors = (neighborResult[0] as any)?.result || [];
           neighbors = (Array.isArray(rawNeighbors) ? rawNeighbors : []).map((r: any) => this.mapRecordToEntity(r));
       }
@@ -116,9 +124,13 @@ export class GraphOperations {
   // --- 3. GLOBAL VIEW STRATEGY ---
   async getGraphData(documentId?: string) {
     try {
-        console.log(`[GraphOps] Loading graph data...`);
-        const rels = await this.getAllRelationships(documentId); 
+        console.log(`[GraphOps] Loading graph data (Limits: Nodes=${GRAPH_LIMITS.INITIAL_NODES}, Edges=${GRAPH_LIMITS.MAX_EDGES})...`);
         
+        // 1. Fetch Edges First (The Skeleton)
+        const rels = await this.getAllRelationships(documentId); 
+        console.log(`[GraphOps] Found ${rels.length} relationships.`);
+        
+        // 2. Identify "Critical Nodes" (Nodes touched by these edges)
         const criticalNodeIds = new Set<string>();
         rels.forEach(r => {
             if(r.from) criticalNodeIds.add(r.from);
@@ -126,26 +138,30 @@ export class GraphOperations {
         });
         const requiredIds = Array.from(criticalNodeIds);
 
+        // 3. Fetch Critical Nodes
         let criticalEntities: Entity[] = [];
         if (requiredIds.length > 0) {
+            // Fetch in batches if too many (SurrealDB might have limit on IN clause)
             const nodeQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE id IN $ids`;
             const nodeResult = await this.db.query(nodeQuery, { ids: requiredIds });
-            // FIX: Cast result to any[]
             const rawNodes = (nodeResult[0] as any)?.result || [];
             criticalEntities = (Array.isArray(rawNodes) ? rawNodes : []).map((r: any) => this.mapRecordToEntity(r));
         }
 
+        // 4. If we still have room, fetch "Filler Nodes" (orphans or recent nodes)
         const remainingLimit = GRAPH_LIMITS.INITIAL_NODES - criticalEntities.length;
         let fillerEntities: Entity[] = [];
         
         if (remainingLimit > 0) {
             let fillerQuery = `SELECT * FROM ${TABLES.ENTITY} WHERE true`; 
             if (documentId) fillerQuery += ` AND metadata.source = $documentId`;
+            
+            // Exclude already loaded nodes
             if (requiredIds.length > 0) fillerQuery += ` AND id NOT IN $ids`;
+            
             fillerQuery += ` ORDER BY updatedAt DESC LIMIT ${remainingLimit}`;
             
             const fillerResult = await this.db.query(fillerQuery, { ids: requiredIds, documentId });
-            // FIX: Cast result to any[]
             const rawFillers = (fillerResult[0] as any)?.result || [];
             fillerEntities = (Array.isArray(rawFillers) ? rawFillers : []).map((r: any) => this.mapRecordToEntity(r));
         }
@@ -169,23 +185,13 @@ export class GraphOperations {
     } catch (error: any) { throw error; }
   }
 
-  // --- FIX 1: ROBUST UPDATE ENTITY ---
-  // Fixes the "Failed to save entity" 500 Error
   async updateEntity(id: string, updates: any): Promise<Entity> {
     try {
-      // 1. Normalize ID to ensure we target "entity:xyz"
       const clean = cleanId(id);
       const recordId = `${TABLES.ENTITY}:${clean}`;
-
-      // 2. Remove 'id' from the update payload
-      // SurrealDB throws an error if you try to "update" the immutable ID field
       const { id: ignoredId, ...cleanUpdates } = updates;
-      
-      // 3. Add timestamp
       cleanUpdates.updatedAt = new Date().toISOString();
-
       console.log(`[GraphOps] Updating Entity: ${recordId}`, cleanUpdates);
-
       const result = await this.db.merge(recordId, cleanUpdates);
       return this.mapRecordToEntity(result);
     } catch (e: any) {
@@ -194,16 +200,11 @@ export class GraphOperations {
     }
   }
 
-  // --- FIX 2: ROBUST DELETE ENTITY ---
   async deleteEntity(id: string): Promise<void> {
     try {
       const clean = cleanId(id);
       const recordId = `${TABLES.ENTITY}:${clean}`;
-
-      // 1. Delete connected edges first (cleanup)
       await this.db.query(`DELETE FROM relationship WHERE from = $id OR to = $id`, { id: recordId });
-      
-      // 2. Delete the node
       await this.db.delete(recordId);
       console.log(`[GraphOps] Deleted Entity: ${recordId}`);
     } catch (e) {
@@ -211,7 +212,6 @@ export class GraphOperations {
     }
   }
 
-  // --- ROBUST CREATE RELATIONSHIP (Already Fixed) ---
   async createRelationship(from: string, to: string, type: string, properties: any = {}, confidence: number = 1): Promise<Relationship> {
       console.log(`[GraphOps] Creating Relationship: ${from} -> ${type} -> ${to}`);
       
@@ -236,10 +236,7 @@ export class GraphOperations {
         const result = await this.db.query(query, { confidence, properties, createdAt: now });
         // @ts-ignore
         const record = result[0]?.result?.[0];
-        
-        if (!record) {
-            throw new Error(`Database returned no result. Check if entities exist: ${rawFrom}, ${rawTo}`);
-        }
+        if (!record) throw new Error(`Database returned no result.`);
         return this.mapRecordToRelationship(record);
       } catch (e: any) {
         console.error("[GraphOps] Create Relationship Failed:", e);
@@ -284,12 +281,7 @@ export class GraphOperations {
       // @ts-ignore
       const docCount = docRes[0]?.result?.[0]?.count || 0;
 
-      return {
-        nodes: entityCount,
-        edges: relCount,
-        documents: docCount,
-        lastUpdated: new Date().toISOString()
-      };
+      return { nodes: entityCount, edges: relCount, documents: docCount, lastUpdated: new Date().toISOString() };
     } catch (e) {
       console.error("Stats Error:", e);
       return { nodes: 0, edges: 0, documents: 0 };
@@ -299,28 +291,45 @@ export class GraphOperations {
   // --- HELPERS ---
   async getAllRelationships(documentId?: string): Promise<Relationship[]> {
     try {
+      // 1. Discover Edge Tables
       const info = await this.db.query('INFO FOR DB');
       // @ts-ignore
       const tablesObject = info[0]?.result?.tables || {}; 
-      // FIX: Cast to string[] to allow .filter
       const allTableNames = Object.keys(tablesObject) as string[];
       
       const exclude = ["entity", "document", "relationship_def", "data_source_config", "user", "session"];
       const edgeTables = allTableNames.filter(t => !exclude.includes(t));
-      if (edgeTables.length === 0) return [];
+      
+      if (edgeTables.length === 0) {
+          console.warn("[GraphOps] No edge tables found via INFO FOR DB.");
+          return [];
+      }
+      
+      console.log(`[GraphOps] Fetching edges from tables: ${edgeTables.join(', ')}`);
 
+      // 2. Fetch from ALL found edge tables
       let query = `SELECT * FROM ${edgeTables.join(', ')}`;
-      if (documentId) query += ` WHERE source = $documentId OR source = '${documentId}'`;
+      if (documentId) {
+          // Note: In SurrealDB, strict ID matching might be safer than 'source' field if it varies
+          query += ` WHERE metadata.source = $documentId OR source = $documentId`;
+      }
+      // Increased Limit
       query += ` ORDER BY createdAt DESC LIMIT ${GRAPH_LIMITS.MAX_EDGES}`; 
       
       const result = await this.db.query(query, { documentId });
-      // FIX: Cast to any[] to allow .filter and .map
       const rawRecords = (result[0] as any)?.result || [];
       const records = Array.isArray(rawRecords) ? rawRecords : [];
       
+      // 3. Robust Filter: Ensure it looks like an edge
       const validEdges = records.filter((r: any) => (r.in && r.out) || (r.from && r.to));
+      
+      console.log(`[GraphOps] Raw Edge Records: ${records.length}, Valid Edges: ${validEdges.length}`);
+      
       return validEdges.map((r: any) => this.mapRecordToRelationship(r));
-    } catch (e) { return []; }
+    } catch (e) { 
+        console.error("getAllRelationships Error:", e);
+        return []; 
+    }
   }
 
   private mapRecordToEntity(r: any): Entity {
@@ -328,7 +337,17 @@ export class GraphOperations {
   }
 
   private mapRecordToRelationship(r: any): Relationship {
-    return { id: r.id, from: r.from || r.in, to: r.to || r.out, type: r.id ? r.id.split(':')[0] : "Edge", properties: r.properties || {}, confidence: r.confidence, source: r.source, createdAt: r.createdAt };
+    // Backend Normalization: Ensure from/to are always populated from in/out
+    return { 
+        id: r.id, 
+        from: r.from || r.in, 
+        to: r.to || r.out, 
+        type: r.id ? r.id.split(':')[0] : "Edge", 
+        properties: r.properties || {}, 
+        confidence: r.confidence, 
+        source: r.source, 
+        createdAt: r.createdAt 
+    };
   }
 
   private mapRecordToDocument(r: any): Document { 
@@ -344,7 +363,6 @@ export class GraphOperations {
     }; 
   }
   
-  // --- FETCH DOCUMENTS ---
   async getAllDocuments(): Promise<Document[]> {
     try {
       if (typeof window !== 'undefined') {

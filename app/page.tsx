@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import GraphVisualization, { type GraphVisualizationRef } from "@/components/GraphVisualization";
 import GraphControls from "@/components/GraphControls";
 import NodeDetailPanel from "@/components/NodeDetailPanel";
-import FilterPanel from "@/components/FilterPanel"; 
+import FilterPanel from "@/components/FilterPanel";
 import MainSidebar from "@/components/MainSidebar";
 import FileUpload from "@/components/FileUpload";
 import TextInput from "@/components/TextInput";
@@ -17,42 +17,56 @@ import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
 import { useGraph } from "@/hooks/useGraph";
 import { useSurrealDB } from "@/hooks/useSurrealDB";
-import { surrealDB } from "@/lib/surrealdb-client"; 
+import { surrealDB } from "@/lib/surrealdb-client";
 import { Upload, FileText, Info, Settings, RefreshCw, Trash2 } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
 
+// --- HELPER: Robust ID Normalizer ---
+const getId = (item: any): string => {
+  if (!item) return "";
+  if (typeof item === 'string') return item;
+  if (typeof item === 'object' && item.id) return item.id;
+  return String(item);
+};
+
+// --- HELPER: Strip Table Prefix (e.g., "person:123" -> "123") ---
+const stripId = (id: string): string => {
+  if (!id) return "";
+  return id.includes(':') ? id.split(':').pop()! : id;
+};
+
 export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
-  
+
   // Store hooks
   const { activeTab, setActiveTab, setSelectedEntity, selectedEntity } = useGraphStore();
-  
-  // Graph hooks
-  const { 
-    entities, 
+
+  // Graph hooks (Master Data)
+  const {
+    entities,
     relationships, 
-    loadGraph, 
-    analyzeGraph, 
-    createEntity, 
+    loadGraph,
+    analyzeGraph,
+    createEntity,
     updateEntity,
-    deleteEntity, 
-    createRelationship, 
+    deleteEntity,
+    createRelationship,
     updateRelationship,
-    deleteRelationship 
+    deleteRelationship
   } = useGraph();
 
   const { isConnected } = useSurrealDB();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  
-  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null); 
-  
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<any[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true);
 
-  // UI State
-  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true); 
+  // --- VIRTUALIZATION STATE ---
+  const [viewEntities, setViewEntities] = useState<Entity[]>([]);
+  const [viewRelationships, setViewRelationships] = useState<Relationship[]>([]);
 
-  // --- NEW: NAMESPACE & DATABASE STATE ---
+  // Namespace & Database State
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [databases, setDatabases] = useState<string[]>([]);
   const [selectedNamespace, setSelectedNamespace] = useState<string>("");
@@ -73,154 +87,285 @@ export default function Home() {
   const [selectedEntityFilters, setSelectedEntityFilters] = useState<string[]>([]);
   const [selectedRelFilters, setSelectedRelFilters] = useState<string[]>([]);
 
-  // Memoized data for stability
-  const stableEntities = useMemo(() => entities, [JSON.stringify(entities)]);
-  const stableRelationships = useMemo(() => relationships, [JSON.stringify(relationships)]);
+  // --- STABLE DATA REFERENCES ---
+  const stableEntities = useMemo(() => entities, [entities]);
+  // We use raw relationships here; normalization happens in the Effect below
+  const stableRelationships = useMemo(() => relationships, [relationships]);
 
-  // --- DEBUG VERSION: FETCH NAMESPACES ---
-  const fetchNamespaces = async () => {
-    try {
-        console.log("DEBUG: Attempting to fetch namespaces..."); 
-        const result = await surrealDB.query("INFO FOR ROOT;");
-        console.log("DEBUG: Raw Namespace Result:", result); 
-        
-        // Robust check for different response structures
-        if (Array.isArray(result) && result[0]?.result?.namespaces) {
-            const nsList = Object.keys(result[0].result.namespaces);
-            console.log("DEBUG: Parsed Namespaces (Standard):", nsList);
-            setNamespaces(nsList);
-        } else if (result && (result as any).namespaces) {
-            // Some client versions return the result object directly
-            const nsList = Object.keys((result as any).namespaces);
-            console.log("DEBUG: Parsed Namespaces (Direct):", nsList);
-            setNamespaces(nsList);
-        } else {
-            console.warn("DEBUG: Unexpected response structure. See 'Raw Namespace Result' above.");
+  // --- FIX: VIRTUALIZATION & SMART LINKING ---
+  useEffect(() => {
+    // 1. If no data, clear view
+    if (stableEntities.length === 0) {
+        if (viewEntities.length > 0) {
+            setViewEntities([]);
+            setViewRelationships([]);
         }
-    } catch (e) { 
-        console.error("DEBUG: CRITICAL ERROR fetching namespaces:", e); 
-        toast.error("Failed to load namespaces. Check console.");
+        return;
     }
-  };
 
-  // --- FETCH DATABASES (Dependent on Namespace) ---
-  const fetchDatabases = async (ns: string) => {
+    // 2. Safeguard: Prevent Infinite Loop
+    const limit = 100;
+    const isMasterSameAsView = 
+        viewEntities.length > 0 &&
+        viewEntities.length <= limit &&
+        getId(viewEntities[0]) === getId(stableEntities[0]);
+
+    if (isMasterSameAsView) return;
+
+    // 3. Initialize Top 100 Nodes
+    const initialNodes = stableEntities.slice(0, limit);
+    
+    // Create lookup maps for "Smart Linking"
+    // We map both "full_id" and "stripped_id" to the REAL ID used by the node.
+    const nodeLookup = new Map<string, string>();
+    initialNodes.forEach(node => {
+        const fullId = getId(node);
+        nodeLookup.set(fullId, fullId);          // Exact match
+        nodeLookup.set(stripId(fullId), fullId); // Loose match (no table prefix)
+    });
+
+    // 4. Process & Fix Relationships
+    const validEdges: Relationship[] = [];
+
+    stableRelationships.forEach(r => {
+        // Extract raw IDs (try from/to, then in/out)
+        const rawSource = getId(r.from || r.in || r.source);
+        const rawTarget = getId(r.to || r.out || r.target);
+
+        // Try to find the matching Node ID in our lookup map
+        const sourceMatch = nodeLookup.get(rawSource) || nodeLookup.get(stripId(rawSource));
+        const targetMatch = nodeLookup.get(rawTarget) || nodeLookup.get(stripId(rawTarget));
+
+        // If BOTH ends exist in our node list, we keep the edge
+        if (sourceMatch && targetMatch) {
+            validEdges.push({
+                ...r,
+                // OVERWRITE with the normalized properties needed by visualization
+                source: sourceMatch,
+                target: targetMatch,
+                from: sourceMatch,
+                to: targetMatch
+            });
+        }
+    });
+
+    // Debug Log (Check console if graph is still empty)
+    if (validEdges.length === 0 && stableRelationships.length > 0) {
+        console.warn("Smart Linker found 0 matches. Data Mismatch?", {
+            firstNode: getId(initialNodes[0]),
+            firstEdgeSource: getId(stableRelationships[0]?.from || stableRelationships[0]?.in)
+        });
+    }
+
+    setViewEntities(initialNodes);
+    setViewRelationships(validEdges);
+  }, [stableEntities, stableRelationships, viewEntities]); 
+
+  // Memoize view data for rendering
+  const stableViewEntities = useMemo(() => viewEntities, [viewEntities]);
+  const stableViewRelationships = useMemo(() => viewRelationships, [viewRelationships]);
+
+  // --- NAMESPACE LOGIC ---
+  const fetchNamespaces = useCallback(async () => {
+    try {
+      const result = await surrealDB.query("INFO FOR ROOT;");
+      if (Array.isArray(result) && result[0]?.result?.namespaces) {
+        setNamespaces(Object.keys(result[0].result.namespaces));
+      } else if (result && (result as any).namespaces) {
+        setNamespaces(Object.keys((result as any).namespaces));
+      }
+    } catch (e) { console.error("Failed to fetch namespaces", e); }
+  }, []);
+
+  const fetchDatabases = useCallback(async (ns: string) => {
     if (!ns) { setDatabases([]); return; }
     try {
-        console.log(`DEBUG: Fetching DBs for namespace: ${ns}`);
-        const result = await surrealDB.query(`USE NS ${ns}; INFO FOR NS;`);
-        console.log("DEBUG: Raw Database Result:", result);
+      const result = await surrealDB.query(`USE NS ${ns}; INFO FOR NS;`);
+      if (Array.isArray(result) && result[1]?.result?.databases) {
+        setDatabases(Object.keys(result[1].result.databases));
+      }
+    } catch (e) { console.error("Failed to fetch databases", e); }
+  }, []);
 
-        if (Array.isArray(result) && result[1]?.result?.databases) {
-            const dbList = Object.keys(result[1].result.databases);
-            setDatabases(dbList);
-        }
-    } catch (e) { 
-        console.error("Failed to fetch databases", e); 
-    }
-  };
-
-  // --- DROPDOWN HANDLERS ---
   const handleNamespaceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const newNs = e.target.value;
-      setSelectedNamespace(newNs);
-      setSelectedDatabase(""); 
-      setDatabases([]);        
-      if(newNs) fetchDatabases(newNs);
+    const newNs = e.target.value;
+    setSelectedNamespace(newNs);
+    setSelectedDatabase("");
+    setDatabases([]);
+    if (newNs) fetchDatabases(newNs);
   };
 
   const handleDatabaseChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const newDb = e.target.value;
-      setSelectedDatabase(newDb);
-      
-      if (selectedNamespace && newDb) {
-          try {
-              await surrealDB.use({ ns: selectedNamespace, db: newDb });
-              toast.success(`Switched to ${newDb}`);
-              fetchDocuments();
-          } catch (error) {
-              console.error("Failed to switch DB", error);
-              toast.error("Failed to switch database");
-          }
-      }
+    const newDb = e.target.value;
+    setSelectedDatabase(newDb);
+    if (selectedNamespace && newDb) {
+      try {
+        await surrealDB.use({ ns: selectedNamespace, db: newDb });
+        toast.success(`Switched to ${newDb}`);
+        fetchDocuments();
+      } catch (error) { toast.error("Failed to switch database"); }
+    }
   };
 
   const fetchDocuments = async () => {
     try {
       const res = await fetch("/api/documents");
-      if (res.ok) {
-        const data = await res.json();
-        setDocuments(data);
-      }
-    } catch (e) {
-      console.error("Failed to fetch documents:", e);
-    }
+      if (res.ok) setDocuments(await res.json());
+    } catch (e) { console.error("Failed to fetch documents:", e); }
   };
 
-  // 1. Initial Data Load & Namespace Fetch
+  // Initial Load
   useEffect(() => {
     const init = async () => {
-      try { 
+      try {
         await fetchDocuments();
-        await loadGraph(selectedDocumentId || null); 
+        await loadGraph(selectedDocumentId || null);
         if (isConnected) fetchNamespaces();
-      } 
-      catch (e) { console.error("Initialization error:", e); } 
+      }
+      catch (e) { console.error("Initialization error:", e); }
       finally { setIsInitialLoad(false); }
     };
     init();
-  }, [loadGraph, isConnected]);
+  }, [loadGraph, isConnected, fetchNamespaces]);
 
-  // 2. Reload when Document Changes
   useEffect(() => {
-    if (!isInitialLoad) {
-      loadGraph(selectedDocumentId).catch((error) => console.error("Failed to reload graph:", error));
-    }
-  }, [selectedDocumentId]);
+    if (!isInitialLoad) loadGraph(selectedDocumentId).catch(console.error);
+  }, [selectedDocumentId, loadGraph]);
 
-  // 3. Extract Types for Filters
+  // --- FILTER INITIALIZATION ---
   useEffect(() => {
-    if (entities.length > 0) {
-        const eTypes = Array.from(new Set(entities.map(e => e.type))).sort();
-        setAllEntityTypes(eTypes);
-        setSelectedEntityFilters(prev => prev.length === 0 ? eTypes : prev);
+    if (stableEntities.length > 0) {
+      const eTypes = Array.from(new Set(stableEntities.map(e => e.type))).sort();
+      setAllEntityTypes(prev => (JSON.stringify(prev) === JSON.stringify(eTypes) ? prev : eTypes));
+      setSelectedEntityFilters(prev => (prev.length === 0 ? eTypes : prev));
     }
-    if (relationships.length > 0) {
-        const rTypes = Array.from(new Set(relationships.map(r => r.type))).sort();
-        setAllRelTypes(rTypes);
-        setSelectedRelFilters(prev => prev.length === 0 ? rTypes : prev);
-    }
-  }, [entities, relationships]);
 
-  // 4. Apply Filters (WITH RELATIONSHIP FIX)
+    if (stableRelationships.length > 0) {
+      const rTypes = Array.from(new Set(stableRelationships.map(r => r.type))).sort();
+      setAllRelTypes(prev => (JSON.stringify(prev) === JSON.stringify(rTypes) ? prev : rTypes));
+      setSelectedRelFilters(prev => (prev.length === 0 ? rTypes : prev));
+    }
+  }, [stableEntities, stableRelationships]);
+
   useEffect(() => {
-      if (graphRef.current) {
-          graphRef.current.filterByType(selectedEntityFilters);
-          graphRef.current.filterByRelationship(selectedRelFilters);
-      }
+    if (graphRef.current) {
+      graphRef.current.filterByType(selectedEntityFilters);
+      graphRef.current.filterByRelationship(selectedRelFilters);
+    }
   }, [selectedEntityFilters, selectedRelFilters]);
 
-  const toggleEntityFilter = (type: string) => {
-      setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
-  };
+  // --- SMART SEARCH (Deep Linker) ---
+  const handleSearch = async (query: string) => {
+    const term = query.toLowerCase().trim();
 
-  const toggleRelFilter = (type: string) => {
-      setSelectedRelFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
-  };
+    // Reset to Top 100
+    if (!term) {
+      const limit = 100;
+      // Re-run the same initialization logic as above
+      const initialNodes = stableEntities.slice(0, limit);
+      const nodeLookup = new Map<string, string>();
+      initialNodes.forEach(node => {
+          const fullId = getId(node);
+          nodeLookup.set(fullId, fullId);
+          nodeLookup.set(stripId(fullId), fullId);
+      });
+      const validEdges: Relationship[] = [];
+      stableRelationships.forEach(r => {
+          const rawSource = getId(r.from || r.in || r.source);
+          const rawTarget = getId(r.to || r.out || r.target);
+          const sourceMatch = nodeLookup.get(rawSource) || nodeLookup.get(stripId(rawSource));
+          const targetMatch = nodeLookup.get(rawTarget) || nodeLookup.get(stripId(rawTarget));
+          if (sourceMatch && targetMatch) {
+              validEdges.push({ ...r, source: sourceMatch, target: targetMatch, from: sourceMatch, to: targetMatch });
+          }
+      });
+      setViewEntities(initialNodes);
+      setViewRelationships(validEdges);
 
-  const handleDeleteFile = async () => {
-    if (!selectedDocumentId) return;
-
-    const doc = documents.find(d => d.id === selectedDocumentId);
-    if (!doc) return;
-
-    if (!confirm(`Are you sure you want to delete "${doc.filename}" and all its graph data?`)) {
+      if (graphRef.current) {
+        graphRef.current.searchAndHighlight("");
+        graphRef.current.fit();
+      }
       return;
     }
 
-    setIsDeleting(true);
-    const toastId = toast.loading("Deleting file...");
+    // Search Master Data
+    const match = stableEntities.find(e => (e.label || "").toLowerCase().includes(term));
 
+    if (match) {
+      const matchId = getId(match);
+      const isVisible = viewEntities.some(e => getId(e) === matchId);
+
+      if (!isVisible) {
+        // Find connected IDs (using loose matching)
+        const neighbors = new Set<string>();
+        neighbors.add(matchId);
+        
+        // Find all relationships that touch this node
+        const relatedEdges = stableRelationships.filter(r => {
+             const s = getId(r.from || r.in || r.source);
+             const t = getId(r.to || r.out || r.target);
+             return s === matchId || t === matchId || stripId(s) === stripId(matchId) || stripId(t) === stripId(matchId);
+        });
+
+        relatedEdges.forEach(r => {
+             // Add raw IDs to neighbor set
+             neighbors.add(getId(r.from || r.in || r.source));
+             neighbors.add(getId(r.to || r.out || r.target));
+        });
+
+        // Resolve Neighbors to Real Nodes
+        const newNodes = stableEntities.filter(e => {
+            const id = getId(e);
+            return neighbors.has(id) || neighbors.has(stripId(id));
+        });
+
+        // Create Linker for this specific subset
+        const subsetLookup = new Map<string, string>();
+        newNodes.forEach(n => {
+             const id = getId(n);
+             subsetLookup.set(id, id);
+             subsetLookup.set(stripId(id), id);
+        });
+
+        // Link Edges
+        const newEdges: Relationship[] = [];
+        stableRelationships.forEach(r => {
+             const s = getId(r.from || r.in || r.source);
+             const t = getId(r.to || r.out || r.target);
+             const sMatch = subsetLookup.get(s) || subsetLookup.get(stripId(s));
+             const tMatch = subsetLookup.get(t) || subsetLookup.get(stripId(t));
+             
+             if (sMatch && tMatch) {
+                 newEdges.push({ ...r, source: sMatch, target: tMatch, from: sMatch, to: tMatch });
+             }
+        });
+
+        setViewEntities(newNodes);
+        setViewRelationships(newEdges);
+        toast.success(`Loaded hidden node: ${match.label}`);
+
+        setTimeout(() => {
+          if (graphRef.current) graphRef.current.searchAndHighlight(query);
+        }, 100);
+      } else {
+        if (graphRef.current) graphRef.current.searchAndHighlight(query);
+        toast.success(`Found: ${match.label}`);
+      }
+      setSelectedEntity(match);
+      setActiveTab("details");
+    } else {
+      toast.error("Node not found in loaded graph data");
+    }
+  };
+
+  // --- Handlers ---
+  const handleDeleteFile = async () => {
+    if (!selectedDocumentId) return;
+    const doc = documents.find(d => d.id === selectedDocumentId);
+    if (!doc || !confirm(`Delete "${doc.filename}"?`)) return;
+
+    setIsDeleting(true);
     try {
       const response = await fetch('/api/documents', {
         method: 'DELETE',
@@ -229,335 +374,185 @@ export default function Home() {
       });
 
       if (response.ok) {
-        toast.success("File deleted successfully", { id: toastId });
+        toast.success("File deleted");
         setDocuments(prev => prev.filter(d => d.id !== selectedDocumentId));
-        setSelectedDocumentId(null); 
+        setSelectedDocumentId(null);
         await loadGraph(null);
-      } else {
-        throw new Error("Delete failed");
-      }
-    } catch (error) {
-      console.error("Delete Error:", error);
-      toast.error("Failed to delete file", { id: toastId });
-    } finally {
-      setIsDeleting(false);
-    }
+      } else throw new Error("Delete failed");
+    } catch (e) { toast.error("Failed to delete file"); }
+    finally { setIsDeleting(false); }
   };
 
-  // --- Handlers ---
   const handleEntitySubmit = async (data: any) => {
     try {
       if (editingEntity) await updateEntity(editingEntity.id, data);
       else await createEntity(data);
-      
       await loadGraph(selectedDocumentId);
-      
-      toast.success("Entity saved");
       setShowEntityForm(false); setEditingEntity(null);
-    } catch (error: any) { toast.error("Failed to save entity"); }
+      toast.success("Entity saved");
+    } catch (e) { toast.error("Failed"); }
   };
 
-  const handleRelationshipSubmit = async (from: string, to: string, type: string, properties?: any, confidence?: number) => {
+  const handleRelationshipSubmit = async (from: string, to: string, type: string, props?: any, conf?: number) => {
     try {
-      if (editingRelationship) await updateRelationship(editingRelationship.id, { from, to, type, properties, confidence });
-      else await createRelationship(from, to, type, properties, confidence);
-      
+      if (editingRelationship) await updateRelationship(editingRelationship.id, { from, to, type, properties: props, confidence: conf });
+      else await createRelationship(from, to, type, props, conf);
       await loadGraph(selectedDocumentId);
-
-      toast.success("Relationship saved");
       setShowRelationshipForm(false); setEditingRelationship(null);
-    } catch (error: any) { toast.error("Failed to save relationship"); }
+      toast.success("Relationship saved");
+    } catch (e) { toast.error("Failed"); }
   };
 
-  // --- CONTEXT MENU HANDLERS ---
-  
-  const handleEditNode = (nodeId?: string) => {
-      if (!nodeId) return;
-      const entity = entities.find(e => e.id === nodeId);
-      if (entity) {
-          setEditingEntity(entity);
-          setShowEntityForm(true);
-          setContextMenu(null);
-      }
+  const handleEditNode = (id?: string) => {
+    const e = stableEntities.find(x => getId(x) === id);
+    if (e) { setEditingEntity(e); setShowEntityForm(true); setContextMenu(null); }
   };
-
-  const handleDeleteNode = async (nodeId?: string) => {
-      if (!nodeId) return;
-      if (!confirm("Are you sure you want to delete this node?")) return;
-      try {
-          await deleteEntity(nodeId);
-          await loadGraph(selectedDocumentId);
-          toast.success("Node deleted");
-          setContextMenu(null);
-          setSelectedEntity(null);
-      } catch (e) { toast.error("Failed to delete node"); }
+  const handleDeleteNode = async (id?: string) => {
+    if (id && confirm("Delete node?")) { await deleteEntity(id); await loadGraph(selectedDocumentId); setContextMenu(null); }
   };
-
-  const handleEditRelationship = (edgeId?: string) => {
-      if (!edgeId) return;
-      const rel = relationships.find(r => r.id === edgeId);
-      if (rel) {
-          setEditingRelationship(rel);
-          setRelationshipFromId(rel.from);
-          setRelationshipToId(rel.to);
-          setShowRelationshipForm(true);
-          setContextMenu(null);
-      }
+  const handleEditRelationship = (id?: string) => {
+    const r = stableRelationships.find(x => getId(x) === id);
+    if (r) { setEditingRelationship(r); setRelationshipFromId(r.from); setRelationshipToId(r.to); setShowRelationshipForm(true); setContextMenu(null); }
   };
-
-  const handleDeleteRelationship = async (edgeId?: string) => {
-      if (!edgeId) return;
-      if (!confirm("Are you sure you want to delete this relationship?")) return;
-      try {
-          await deleteRelationship(edgeId);
-          await loadGraph(selectedDocumentId);
-          toast.success("Relationship deleted");
-          setContextMenu(null);
-      } catch (e) { toast.error("Failed to delete relationship"); }
+  const handleDeleteRelationship = async (id?: string) => {
+    if (id && confirm("Delete relationship?")) { await deleteRelationship(id); await loadGraph(selectedDocumentId); setContextMenu(null); }
   };
-
-  const handleCreateRelationship = (arg?: string | unknown) => { 
-      setEditingRelationship(null); 
-      let fromId: string | undefined = undefined;
-
-      if (typeof arg === 'string') {
-          fromId = arg;
-      } 
-      else if (contextMenu?.nodeId) {
-          fromId = contextMenu.nodeId;
-      }
-      else if (selectedEntity) {
-          fromId = selectedEntity.id;
-      }
-      
-      setRelationshipFromId(fromId); 
-      setRelationshipToId(undefined); 
-      setShowRelationshipForm(true); 
-      setContextMenu(null);
+  const handleCreateRelationship = (arg?: string | unknown) => {
+    setEditingRelationship(null);
+    setRelationshipFromId(typeof arg === 'string' ? arg : contextMenu?.nodeId || selectedEntity?.id);
+    setRelationshipToId(undefined); setShowRelationshipForm(true); setContextMenu(null);
   };
-  
   const handleCreateNode = () => { setEditingEntity(null); setShowEntityForm(true); setContextMenu(null); };
 
-  const handleSearch = async (query: string) => {
-    if (!query.trim()) {
-        if (graphRef.current) graphRef.current.searchAndHighlight("");
-        return;
-    }
-    if (graphRef.current) graphRef.current.searchAndHighlight(query);
-    
-    const term = query.toLowerCase();
-    const match = entities.find(e => (e.label || "").toLowerCase().includes(term));
-    if (match) {
-        setSelectedEntity(match); 
-        setActiveTab("details"); 
-        toast.success("Found: " + match.label);
-    }
-  };
-
   const handleAnalyze = async () => {
-    const toastId = toast.loading("Analyzing Graph...");
-    try {
-        await analyzeGraph();
-        toast.success("Done!", { id: toastId });
-        await loadGraph(selectedDocumentId);
-    } catch (e) { toast.error("Failed", { id: toastId }); }
+    const t = toast.loading("Analyzing...");
+    try { await analyzeGraph(); toast.success("Done!", { id: t }); await loadGraph(selectedDocumentId); }
+    catch (e) { toast.error("Failed", { id: t }); }
   };
 
   const handleForceRefresh = () => {
-     if(graphRef.current) graphRef.current.fit();
-     fetchDocuments();
-     loadGraph(selectedDocumentId);
-     if (isConnected) fetchNamespaces(); 
+    if (graphRef.current) graphRef.current.fit();
+    fetchDocuments();
+    loadGraph(selectedDocumentId);
+    if (isConnected) fetchNamespaces();
   };
 
-  const handleContextMenu = (x: number, y: number, target: ContextMenuTarget, nodeId?: string, edgeId?: string) => setContextMenu({ x, y, target, nodeId, edgeId });
-  const handleNodeSelect = (id: string) => { const e = entities.find(x => x.id === id); if(e) { setSelectedEntity(e); setActiveTab("details"); } };
-  const handleNodeDeselect = () => setSelectedEntity(null);
+  const toggleEntityFilter = (type: string) => setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
+  const toggleRelFilter = (type: string) => setSelectedRelFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
 
   const tabs = [
-    { id: "upload" as const, label: "Upload", icon: Upload },
-    { id: "input" as const, label: "Input", icon: FileText },
-    { id: "details" as const, label: "Details", icon: Info },
-    { id: "settings" as const, label: "Settings", icon: Settings },
+    { id: "upload", label: "Upload", icon: Upload },
+    { id: "input", label: "Input", icon: FileText },
+    { id: "details", label: "Details", icon: Info },
+    { id: "settings", label: "Settings", icon: Settings },
   ];
 
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row overflow-hidden">
-        
-        <div className="hidden md:block">
-           <MainSidebar />
-        </div>
+        <div className="hidden md:block"><MainSidebar /></div>
 
         {isFilterPanelOpen && (
-           <div className="hidden md:block border-r border-gray-200">
-             <FilterPanel 
-               entityTypes={allEntityTypes}
-               relationshipTypes={allRelTypes}
-               selectedEntities={selectedEntityFilters}
-               selectedRelationships={selectedRelFilters}
-               onToggleEntity={toggleEntityFilter}
-               onToggleRelationship={toggleRelFilter}
-               onClose={() => setIsFilterPanelOpen(false)}
-             />
-           </div>
+          <div className="hidden md:block border-r border-gray-200">
+            <FilterPanel
+              entityTypes={allEntityTypes} relationshipTypes={allRelTypes}
+              selectedEntities={selectedEntityFilters} selectedRelationships={selectedRelFilters}
+              onToggleEntity={toggleEntityFilter} onToggleRelationship={toggleRelFilter}
+              onClose={() => setIsFilterPanelOpen(false)}
+            />
+          </div>
         )}
 
         <div className="flex-1 flex flex-col h-full overflow-hidden">
-           <header className="bg-white border-b border-gray-200 shadow-sm z-20 px-6 py-4 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                 <h2 className="text-xl font-semibold text-gray-800">Knowledge Graph POC</h2>
-                 <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
-                 <div className={`w-3 h-3 rounded-full ${isConnected ? "bg-green-500" : "bg-gray-400"}`} title={isConnected ? "Connected" : "Disconnected"} />
+          <header className="bg-white border-b border-gray-200 shadow-sm z-20 px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <h2 className="text-xl font-semibold text-gray-800">Knowledge Graph POC</h2>
+              <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
+              <div className={`w-3 h-3 rounded-full ${isConnected ? "bg-green-500" : "bg-gray-400"}`} title={isConnected ? "Connected" : "Disconnected"} />
+            </div>
+            <div className="text-sm text-gray-600">
+              {viewEntities.length < stableEntities.length ?
+                `Viewing ${viewEntities.length} of ${stableEntities.length} entities` :
+                `${stableEntities.length} entities`
+              }
+            </div>
+          </header>
+
+          <div className="flex-1 flex flex-row overflow-hidden bg-gray-50">
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end gap-3">
+                <select value={selectedNamespace} onChange={handleNamespaceChange} className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px]">
+                  <option value="">Select NS</option>
+                  {namespaces.map(ns => <option key={ns} value={ns}>{ns}</option>)}
+                </select>
+                <select value={selectedDatabase} onChange={handleDatabaseChange} disabled={!selectedNamespace} className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px] disabled:bg-gray-100 disabled:text-gray-400">
+                  <option value="">Select DB</option>
+                  {databases.map(db => <option key={db} value={db}>{db}</option>)}
+                </select>
+                <div className="h-6 w-px bg-gray-300 mx-1"></div>
+                <div className="flex items-center gap-2 max-w-md w-full">
+                  <select value={selectedDocumentId || ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)} className="flex-1 p-2 border border-gray-300 rounded-md text-sm">
+                    <option value="">-- Load All / Select File --</option>
+                    {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.filename} ({doc.entityCount} nodes)</option>)}
+                  </select>
+                  <button onClick={handleDeleteFile} disabled={!selectedDocumentId || isDeleting} className="p-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-md disabled:opacity-50 border border-red-200"><Trash2 className="w-4 h-4" /></button>
+                </div>
               </div>
-              <div className="text-sm text-gray-600">{entities.length} entities, {relationships.length} relationships</div>
-           </header>
 
-           <div className="flex-1 flex flex-row overflow-hidden bg-gray-50">
-             <div className="flex-1 flex flex-col min-w-0">
-               <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end gap-3">
-                 
-                 {/* --- 1. NAMESPACE DROPDOWN --- */}
-                 <select
-                    value={selectedNamespace}
-                    onChange={handleNamespaceChange}
-                    className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px]"
-                 >
-                    <option value="">Select NS</option>
-                    {namespaces.map(ns => (
-                        <option key={ns} value={ns}>{ns}</option>
-                    ))}
-                 </select>
+              <GraphControls
+                graphRef={graphRef}
+                onCreateNode={handleCreateNode}
+                onCreateRelationship={handleCreateRelationship}
+                onSearch={handleSearch}
+                onAnalyze={handleAnalyze}
+                isFilterPanelOpen={isFilterPanelOpen}
+                onToggleFilterPanel={() => setIsFilterPanelOpen(true)}
+              />
 
-                 {/* --- 2. DATABASE DROPDOWN --- */}
-                 <select
-                    value={selectedDatabase}
-                    onChange={handleDatabaseChange}
-                    disabled={!selectedNamespace}
-                    className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px] disabled:bg-gray-100 disabled:text-gray-400"
-                 >
-                    <option value="">Select DB</option>
-                    {databases.map(db => (
-                        <option key={db} value={db}>{db}</option>
-                    ))}
-                 </select>
+              <div className="flex-1 relative p-4">
+                {isInitialLoad ? (
+                  <div className="absolute inset-0 flex items-center justify-center"><p className="text-gray-600">Loading...</p></div>
+                ) : (
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full overflow-hidden">
+                    <GraphVisualization
+                      ref={graphRef}
+                      entities={stableViewEntities}
+                      relationships={stableViewRelationships}
+                      onNodeSelect={(id) => { const e = stableEntities.find(x => getId(x) === id); if (e) { setSelectedEntity(e); setActiveTab("details"); } }}
+                      onNodeDeselect={() => setSelectedEntity(null)}
+                      onContextMenu={(x, y, t, n, e) => setContextMenu({ x, y, target: t, nodeId: n, edgeId: e })}
+                      onCreateNode={handleCreateNode}
+                      onCreateRelationship={(f, t) => { setRelationshipFromId(f); setRelationshipToId(t); setShowRelationshipForm(true); }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
 
-                 <div className="h-6 w-px bg-gray-300 mx-1"></div>
-                 
-                 {/* --- 3. EXISTING FILE DROPDOWN --- */}
-                 <div className="flex items-center gap-2 max-w-md w-full">
-                    <select
-                        value={selectedDocumentId || ""}
-                        onChange={(e) => setSelectedDocumentId(e.target.value || null)}
-                        className="flex-1 p-2 border border-gray-300 rounded-md text-sm"
-                    >
-                        <option value="">-- Load All / Select File --</option>
-                        {documents.map((doc) => (
-                            <option key={doc.id} value={doc.id}>
-                                {doc.filename} ({doc.entityCount} nodes)
-                            </option>
-                        ))}
-                    </select>
-
-                    <button
-                        onClick={handleDeleteFile}
-                        disabled={!selectedDocumentId || isDeleting}
-                        className="p-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-md disabled:opacity-50 border border-red-200 transition-colors"
-                        title="Delete selected file"
-                    >
-                        <Trash2 className="w-4 h-4" />
+            <div className="w-80 lg:w-96 bg-white border-l border-gray-200 flex flex-col z-10">
+              <div className="flex border-b border-gray-200 overflow-x-auto">
+                {tabs.map((tab: any) => {
+                  const Icon = tab.icon;
+                  return (
+                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 min-w-[60px] flex items-center justify-center gap-1 py-3 text-xs lg:text-sm font-medium ${activeTab === tab.id ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-600 hover:bg-gray-50"}`}>
+                      <Icon className="w-4 h-4" /> <span className="hidden sm:inline">{tab.label}</span>
                     </button>
-                 </div>
-
-               </div>
-               
-               <GraphControls 
-                 graphRef={graphRef} 
-                 onCreateNode={handleCreateNode} 
-                 onCreateRelationship={handleCreateRelationship} 
-                 onSearch={handleSearch} 
-                 onAnalyze={handleAnalyze} 
-                 isFilterPanelOpen={isFilterPanelOpen}
-                 onToggleFilterPanel={() => setIsFilterPanelOpen(true)}
-               />
-  
-               <div className="flex-1 relative p-4">
-                 {isInitialLoad ? (
-                   <div className="absolute inset-0 flex items-center justify-center"><p className="text-gray-600">Loading...</p></div>
-                 ) : (
-                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 h-full overflow-hidden">
-                       <GraphVisualization
-                       ref={graphRef}
-                       entities={stableEntities}
-                       relationships={stableRelationships}
-                       onNodeSelect={handleNodeSelect}
-                       onNodeDeselect={handleNodeDeselect}
-                       onContextMenu={handleContextMenu}
-                       onCreateNode={handleCreateNode}
-                       onCreateRelationship={(f, t) => { setRelationshipFromId(f); setRelationshipToId(t); setShowRelationshipForm(true); }}
-                       />
-                   </div>
-                 )}
-               </div>
-             </div>
-
-             <div className="w-80 lg:w-96 bg-white border-l border-gray-200 flex flex-col z-10">
-               <div className="flex border-b border-gray-200 overflow-x-auto">
-                 {tabs.map((tab) => {
-                   const Icon = tab.icon;
-                   return (
-                     <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 min-w-[60px] flex items-center justify-center gap-1 py-3 text-xs lg:text-sm font-medium ${activeTab === tab.id ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-600 hover:bg-gray-50"}`}>
-                       <Icon className="w-4 h-4" /> <span className="hidden sm:inline">{tab.label}</span>
-                     </button>
-                   );
-                 })}
-               </div>
-               <div className="flex-1 overflow-y-auto p-4">
-                 {activeTab === "upload" && <FileUpload />}
-                 {activeTab === "input" && <TextInput />}
-                 {activeTab === "details" && <NodeDetailPanel onClose={() => setSelectedEntity(null)} onCreateRelationship={handleCreateRelationship} onEditRelationship={()=>{}} onDeleteRelationship={()=>{}} />}
-                 {activeTab === "settings" && <SettingsPanel />}
-               </div>
-             </div>
-           </div>
+                  );
+                })}
+              </div>
+              <div className="flex-1 overflow-y-auto p-4">
+                {activeTab === "upload" && <FileUpload />}
+                {activeTab === "input" && <TextInput />}
+                {activeTab === "details" && <NodeDetailPanel onClose={() => setSelectedEntity(null)} onCreateRelationship={handleCreateRelationship} onEditRelationship={() => { }} onDeleteRelationship={() => { }} />}
+                {activeTab === "settings" && <SettingsPanel />}
+              </div>
+            </div>
+          </div>
         </div>
-        
-        {showEntityForm && (
-            <EntityForm 
-                entity={editingEntity || undefined} 
-                existingTypes={allEntityTypes} 
-                onSubmit={handleEntitySubmit} 
-                onCancel={() => setShowEntityForm(false)} 
-            />
-        )}
-        
-        {showRelationshipForm && (
-            <RelationshipForm 
-                fromEntityId={relationshipFromId} 
-                toEntityId={relationshipToId} 
-                relationship={editingRelationship || undefined} 
-                entities={stableEntities} 
-                existingRelationships={stableRelationships} 
-                onSubmit={handleRelationshipSubmit} 
-                onCancel={() => setShowRelationshipForm(false)} 
-            />
-        )}
-        
-        {contextMenu && (
-            <ContextMenu 
-                x={contextMenu.x} 
-                y={contextMenu.y} 
-                target={contextMenu.target} 
-                onCreateNode={handleCreateNode} 
-                onEditNode={() => handleEditNode(contextMenu.nodeId)} 
-                onDeleteNode={() => handleDeleteNode(contextMenu.nodeId)} 
-                onCreateRelationship={() => handleCreateRelationship(contextMenu.nodeId)} 
-                onEditEdge={() => handleEditRelationship(contextMenu.edgeId)} 
-                onDeleteEdge={() => handleDeleteRelationship(contextMenu.edgeId)} 
-                onClose={() => setContextMenu(null)} 
-            />
-        )}
 
+        {showEntityForm && <EntityForm entity={editingEntity || undefined} existingTypes={allEntityTypes} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
+        {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={stableEntities} existingRelationships={stableRelationships} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
+        {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} target={contextMenu.target} onCreateNode={handleCreateNode} onEditNode={() => handleEditNode(contextMenu.nodeId)} onDeleteNode={() => handleDeleteNode(contextMenu.nodeId)} onCreateRelationship={() => handleCreateRelationship(contextMenu.nodeId)} onEditEdge={() => handleEditRelationship(contextMenu.edgeId)} onDeleteEdge={() => handleDeleteRelationship(contextMenu.edgeId)} onClose={() => setContextMenu(null)} />}
         <Toaster position="top-right" />
       </div>
     </ErrorBoundary>
