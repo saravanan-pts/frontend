@@ -87,10 +87,10 @@ export default function Home() {
   const [selectedEntityFilters, setSelectedEntityFilters] = useState<string[]>([]);
   const [selectedRelFilters, setSelectedRelFilters] = useState<string[]>([]);
 
-  // --- STABLE DATA REFERENCES ---
-  const stableEntities = useMemo(() => entities, [entities]);
-  // We use raw relationships here; normalization happens in the Effect below
-  const stableRelationships = useMemo(() => relationships, [relationships]);
+  // --- STABLE DATA REFERENCES (Fixed Stability) ---
+  // We avoid JSON.stringify for performance, but ensure it updates when counts change
+  const stableEntities = useMemo(() => entities, [entities.length, entities[0]?.id]);
+  const stableRelationships = useMemo(() => relationships, [relationships.length, relationships[0]?.id]);
 
   // --- FIX: VIRTUALIZATION & SMART LINKING ---
   useEffect(() => {
@@ -112,53 +112,46 @@ export default function Home() {
 
     if (isMasterSameAsView) return;
 
-    // 3. Initialize Top 100 Nodes
-    const initialNodes = stableEntities.slice(0, limit);
-    
-    // Create lookup maps for "Smart Linking"
-    // We map both "full_id" and "stripped_id" to the REAL ID used by the node.
-    const nodeLookup = new Map<string, string>();
-    initialNodes.forEach(node => {
-        const fullId = getId(node);
-        nodeLookup.set(fullId, fullId);          // Exact match
-        nodeLookup.set(stripId(fullId), fullId); // Loose match (no table prefix)
-    });
-
-    // 4. Process & Fix Relationships
-    const validEdges: Relationship[] = [];
-
-    stableRelationships.forEach(r => {
-        // Extract raw IDs (try from/to, then in/out)
-        const rawSource = getId(r.from || r.in || r.source);
-        const rawTarget = getId(r.to || r.out || r.target);
-
-        // Try to find the matching Node ID in our lookup map
-        const sourceMatch = nodeLookup.get(rawSource) || nodeLookup.get(stripId(rawSource));
-        const targetMatch = nodeLookup.get(rawTarget) || nodeLookup.get(stripId(rawTarget));
-
-        // If BOTH ends exist in our node list, we keep the edge
-        if (sourceMatch && targetMatch) {
-            validEdges.push({
-                ...r,
-                // OVERWRITE with the normalized properties needed by visualization
-                source: sourceMatch,
-                target: targetMatch,
-                from: sourceMatch,
-                to: targetMatch
-            });
-        }
-    });
-
-    // Debug Log (Check console if graph is still empty)
-    if (validEdges.length === 0 && stableRelationships.length > 0) {
-        console.warn("Smart Linker found 0 matches. Data Mismatch?", {
-            firstNode: getId(initialNodes[0]),
-            firstEdgeSource: getId(stableRelationships[0]?.from || stableRelationships[0]?.in)
+    // --- CRITICAL FIX: Wrap calculation in Timeout to unblock UI during Upload ---
+    const timer = setTimeout(() => {
+        // 3. Initialize Top 100 Nodes
+        const initialNodes = stableEntities.slice(0, limit);
+        
+        // Create lookup maps for "Smart Linking"
+        const nodeLookup = new Map<string, string>();
+        initialNodes.forEach(node => {
+            const fullId = getId(node);
+            nodeLookup.set(fullId, fullId);           // Exact match
+            nodeLookup.set(stripId(fullId), fullId); // Loose match (no table prefix)
         });
-    }
 
-    setViewEntities(initialNodes);
-    setViewRelationships(validEdges);
+        // 4. Process & Fix Relationships
+        const validEdges: Relationship[] = [];
+
+        stableRelationships.forEach(r => {
+            const rawSource = getId(r.from || r.in || r.source);
+            const rawTarget = getId(r.to || r.out || r.target);
+
+            const sourceMatch = nodeLookup.get(rawSource) || nodeLookup.get(stripId(rawSource));
+            const targetMatch = nodeLookup.get(rawTarget) || nodeLookup.get(stripId(rawTarget));
+
+            if (sourceMatch && targetMatch) {
+                validEdges.push({
+                    ...r,
+                    source: sourceMatch,
+                    target: targetMatch,
+                    from: sourceMatch,
+                    to: targetMatch
+                });
+            }
+        });
+
+        setViewEntities(initialNodes);
+        setViewRelationships(validEdges);
+    }, 10); // 10ms delay allows React to render the "Upload Success" toast first
+
+    return () => clearTimeout(timer);
+
   }, [stableEntities, stableRelationships, viewEntities]); 
 
   // Memoize view data for rendering
@@ -261,7 +254,6 @@ export default function Home() {
     // Reset to Top 100
     if (!term) {
       const limit = 100;
-      // Re-run the same initialization logic as above
       const initialNodes = stableEntities.slice(0, limit);
       const nodeLookup = new Map<string, string>();
       initialNodes.forEach(node => {
@@ -309,7 +301,6 @@ export default function Home() {
         });
 
         relatedEdges.forEach(r => {
-             // Add raw IDs to neighbor set
              neighbors.add(getId(r.from || r.in || r.source));
              neighbors.add(getId(r.to || r.out || r.target));
         });
@@ -320,7 +311,6 @@ export default function Home() {
             return neighbors.has(id) || neighbors.has(stripId(id));
         });
 
-        // Create Linker for this specific subset
         const subsetLookup = new Map<string, string>();
         newNodes.forEach(n => {
              const id = getId(n);
@@ -328,7 +318,6 @@ export default function Home() {
              subsetLookup.set(stripId(id), id);
         });
 
-        // Link Edges
         const newEdges: Relationship[] = [];
         stableRelationships.forEach(r => {
              const s = getId(r.from || r.in || r.source);

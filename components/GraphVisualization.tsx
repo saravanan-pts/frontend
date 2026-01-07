@@ -21,22 +21,22 @@ if (typeof window !== "undefined") {
 const getEntityColor = (type: string) => {
     const t = (type || "Concept");
     
-    // 1. Time/Date: Grey (Requested)
+    // 1. Time/Date: Grey
     if (t === "Time" || t === "Date") return "#6b7280"; 
     
-    // 2. Location: Yellow (Updated to specific hex)
+    // 2. Location: Yellow
     if (t === "Location" || t === "Region") return "#F8AE25"; 
     
-    // 3. Events: Orange (Requested)
+    // 3. Events: Orange
     if (t === "Event" || t === "Activity") return "#f97316"; 
     
-    // 4. People: Blue (Requested)
+    // 4. People: Blue
     if (t === "Person" || t === "Agent") return "#3b82f6"; 
 
-    // 5. Organization: Green (Requested)
+    // 5. Organization: Green
     if (t === "Organization" || t === "Company" || t === "Department") return "#10b981";
     
-    // 6. Concepts: Purple (Requested)
+    // 6. Concepts: Purple
     return "#8b5cf6"; 
 };
 
@@ -97,18 +97,20 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                     return ele.data("label") || ele.data("id");
                   },
                   "shape": "ellipse",
-                  // Events are bigger
-                  "width": (ele: any) => (ele.data("type") === 'Event' ? "80px" : "60px"),   
-                  "height": (ele: any) => (ele.data("type") === 'Event' ? "80px" : "60px"), 
+                  // --- SIZE INCREASED HERE ---
+                  "width": (ele: any) => (ele.data("type") === 'Event' ? "120px" : "90px"),   
+                  "height": (ele: any) => (ele.data("type") === 'Event' ? "120px" : "90px"), 
+                  
                   "padding": "0px",
                   "text-wrap": "wrap",
-                  "text-max-width": "55px", 
-                  "font-size": "9px",
+                  "text-max-width": "80px", 
+                  "font-size": "14px",      // Increased font size
+                  "font-weight": "bold",    // Made bold for readability
                   "color": "#fff",
                   "text-valign": "center", 
                   "text-halign": "center",
                   "text-justification": "center",
-                  "text-outline-width": 1.5,
+                  "text-outline-width": 2,  // Thicker outline
                   "text-outline-color": "#555"
                 },
               },
@@ -117,7 +119,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 style: {
                   "background-color": "#f3f4f6", "background-opacity": 0.5,
                   "border-width": 2, "border-color": "#8b5cf6", "border-style": "dashed",
-                  "label": "data(label)", "color": "#6d28d9", "font-size": "14px", "font-weight": "bold",
+                  "label": "data(label)", "color": "#6d28d9", "font-size": "16px", "font-weight": "bold",
                   "text-valign": "top", "text-halign": "center"
                 }
               },
@@ -125,22 +127,26 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                 selector: "edge",
                 style: {
                   "width": (ele: EdgeSingular) => {
-                     const type = ele.data("type");
-                     return (type === 'NEXT' || type === 'Sequence') ? 3 : 1.5;
+                      const type = ele.data("type");
+                      return (type === 'NEXT' || type === 'Sequence') ? 4 : 2;
                   },
                   "line-color": (ele: EdgeSingular) => {
-                     const type = ele.data("type");
-                     return (type === 'NEXT' || type === 'Sequence') ? "#3b82f6" : "#cbd5e1";
+                      const type = ele.data("type");
+                      return (type === 'NEXT' || type === 'Sequence') ? "#3b82f6" : "#cbd5e1";
                   },
                   "target-arrow-color": (ele: EdgeSingular) => {
-                     const type = ele.data("type");
-                     return (type === 'NEXT' || type === 'Sequence') ? "#3b82f6" : "#cbd5e1";
+                      const type = ele.data("type");
+                      return (type === 'NEXT' || type === 'Sequence') ? "#3b82f6" : "#cbd5e1";
                   },
                   "target-arrow-shape": "triangle", 
                   "curve-style": "bezier",
                   "label": "data(type)", 
-                  "font-size": "8px", 
-                  "text-rotation": "autorotate"
+                  "font-size": "10px", // Slightly larger edge labels
+                  "text-rotation": "autorotate",
+                  "text-background-opacity": 1,
+                  "text-background-color": "#ffffff",
+                  "text-background-padding": "2px",
+                  "text-background-shape": "roundrectangle"
                 }
               },
               { 
@@ -150,16 +156,16 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
               { 
                 selector: ".highlighted", 
                 style: { 
-                  "border-width": 4, 
+                  "border-width": 6, 
                   "border-color": "#FBBF24", 
-                  "width": 65, 
-                  "height": 65, 
+                  "width": 100, 
+                  "height": 100, 
                   "z-index": 999 
                 } 
               }
           ],
           layout: { name: "fcose" } as any,
-          minZoom: 0.1, maxZoom: 3,
+          minZoom: 0.2, maxZoom: 3,
         });
 
         // Event Listeners
@@ -264,13 +270,21 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             cy.add([...nodes, ...edges] as any);
         });
 
+        // --- UPDATE: Balanced Layout ---
+        // Increased idealEdgeLength to handle larger nodes without overlapping
         cy.layout({ 
             name: 'fcose', 
             animate: true, 
-            animationDuration: 500,
-            nodeRepulsion: 5000, 
-            idealEdgeLength: 60, 
-            padding: 20
+            animationDuration: 1000, 
+            quality: "proof",
+            randomize: true, 
+            nodeRepulsion: 20000,   // Reduced slightly so nodes aren't miles apart
+            idealEdgeLength: 200,   // Increased because nodes are bigger now
+            edgeElasticity: 0.45,
+            nestingFactor: 0.1,
+            gravity: 0.25,
+            numIter: 2500,
+            padding: 50
         } as any).run();
 
     }, [entities, relationships]);
