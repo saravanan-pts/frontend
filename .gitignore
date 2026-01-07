@@ -14,3 +14,5 @@ docs/
 .env
 .env.*
 demo.csv
+*.csv
+*.CSV

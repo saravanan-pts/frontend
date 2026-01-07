@@ -6,7 +6,7 @@
 
 
 
-FILES=(/home/ubuntu/latest2/Sample_Data.CSV)
+FILES=(/home/ubuntu/irmai-kg-fx-demo/FO_EXE_LOG.csv)
 
 
 

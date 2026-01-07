@@ -103,19 +103,10 @@ export default function Home() {
         return;
     }
 
-    // 2. Safeguard: Prevent Infinite Loop
-    const limit = 100;
-    const isMasterSameAsView = 
-        viewEntities.length > 0 &&
-        viewEntities.length <= limit &&
-        getId(viewEntities[0]) === getId(stableEntities[0]);
-
-    if (isMasterSameAsView) return;
-
     // --- CRITICAL FIX: Wrap calculation in Timeout to unblock UI during Upload ---
     const timer = setTimeout(() => {
         // 3. Initialize Top 100 Nodes
-        const initialNodes = stableEntities.slice(0, limit);
+        const initialNodes = stableEntities.slice(0, 100);
         
         // Create lookup maps for "Smart Linking"
         const nodeLookup = new Map<string, string>();
@@ -152,7 +143,7 @@ export default function Home() {
 
     return () => clearTimeout(timer);
 
-  }, [stableEntities, stableRelationships, viewEntities]); 
+  }, [stableEntities, stableRelationships]); 
 
   // Memoize view data for rendering
   const stableViewEntities = useMemo(() => viewEntities, [viewEntities]);
@@ -344,7 +335,50 @@ export default function Home() {
       setSelectedEntity(match);
       setActiveTab("details");
     } else {
-      toast.error("Node not found in loaded graph data");
+      // If not found locally, perform a global search
+      try {
+        const response = await fetch(`/api/graph/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ payload: { query: term } })
+        });
+
+        if (!response.ok) {
+          throw new Error('Search failed');
+        }
+        
+        const { entities: newEntities, relationships: newRels } = await response.json();
+
+        if (newEntities && newEntities.length > 0) {
+          const { addEntity, addRelationship } = useGraphStore.getState();
+
+          // Add new data to the main store
+          newEntities.forEach((e: Entity) => addEntity(e));
+          newRels.forEach((r: Relationship) => addRelationship(r));
+
+          // Append new nodes and edges to the view
+          setViewEntities(prev => [...prev, ...newEntities.filter((ne: Entity) => !prev.some(pe => pe.id === ne.id))]);
+          setViewRelationships(prev => [...prev, ...newRels.filter((nr: Relationship) => !prev.some(pr => pr.id === nr.id))]);
+          
+          const newMatch = newEntities.find((e: Entity) => (e.label || "").toLowerCase().includes(term));
+          
+          if (newMatch) {
+            toast.success(`Found in database: ${newMatch.label}`);
+            setSelectedEntity(newMatch);
+            setActiveTab("details");
+            
+            setTimeout(() => {
+              if (graphRef.current) graphRef.current.searchAndHighlight(query);
+            }, 200); // Increased timeout to allow for state updates
+          }
+
+        } else {
+          toast.error("Node not found in the database.");
+        }
+      } catch (error) {
+        toast.error("An error occurred during global search.");
+        console.error("Global search error:", error);
+      }
     }
   };
 
