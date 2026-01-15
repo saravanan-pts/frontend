@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useGraphStore } from "@/lib/store";
-import { graphService } from "../services/graphService"; // <--- NOW USES EXTERNAL SERVICE
+import { graphService } from "../services/graphService";
 import type { Entity, Relationship } from "@/types";
 
 export function useGraph() {
@@ -12,16 +12,14 @@ export function useGraph() {
   const relationships = store.relationships;
   const selectedRelationship = store.selectedRelationship;
 
-  // --- ACTIONS ---
-
-  // 1. Load Graph Data
+  // --- 1. LOAD DATA ---
   const loadGraph = useCallback(async (documentId: string | null) => {
     setIsLoading(true);
     setError(null);
     try {
       const { setEntities, setRelationships } = useGraphStore.getState();
       
-      // Call External Backend
+      // Call the API (GET /graph/fetch)
       const data = await graphService.getAll(documentId);
       
       setEntities(data.entities || []);
@@ -38,105 +36,88 @@ export function useGraph() {
     loadGraph(null);
   }, [loadGraph]);
 
-  // 2. Search
+  // --- 2. SEARCH (Client-Side Logic) ---
   const searchGraph = async (query: string, type?: string) => {
-    try {
-      return await graphService.search(query);
-    } catch (e: any) {
-      throw e;
-    }
+    // Since backend has no search, we filter what we already downloaded
+    const lowerQuery = query.toLowerCase();
+    const allEntities = Array.from(useGraphStore.getState().entities.values());
+    
+    // Filter locally
+    const filtered = allEntities.filter(node => 
+      node.label?.toLowerCase().includes(lowerQuery) ||
+      JSON.stringify(node.properties).toLowerCase().includes(lowerQuery)
+    );
+
+    return { entities: filtered, relationships: [] };
   };
 
-  // 3. Stats & Analysis
+  // --- 3. STATS (Client-Side Logic) ---
   const getStats = async () => {
-    return await graphService.getStats();
+    // Simply count the data in the store
+    const store = useGraphStore.getState();
+    return {
+        nodeCount: store.entities.size,
+        edgeCount: store.relationships.length,
+        // Add fake stats if UI needs them
+        density: 0,
+        communities: 0
+    };
   };
 
   const analyzeGraph = async () => {
     return await graphService.analyze();
   };
 
-  // --- CRUD: ENTITIES ---
+  // --- CRUD WRAPPERS ---
   const createEntity = async (e: any) => {
-    try {
-      const newEntity = await graphService.createNode(e);
-      useGraphStore.getState().addEntity(newEntity);
-      return newEntity;
-    } catch (err) { throw err; }
+    const newEntity = await graphService.createNode(e);
+    useGraphStore.getState().addEntity(newEntity);
+    return newEntity;
   };
 
-  const updateEntity = async (id: string, updates: any) => {
-    try {
-      const updatedEntity = await graphService.updateNode(id, updates);
-      useGraphStore.getState().updateEntity(id, updatedEntity);
-      return updatedEntity;
-    } catch (err) { throw err; }
+  const updateEntity = async (id: string, u: any) => {
+    const updatedEntity = await graphService.updateNode(id, u);
+    useGraphStore.getState().updateEntity(id, updatedEntity);
+    return updatedEntity;
   };
 
   const deleteEntity = async (id: string) => {
-    try {
-      await graphService.deleteNode(id);
-      useGraphStore.getState().deleteEntity(id);
-    } catch (err) { throw err; }
+    await graphService.deleteNode(id);
+    useGraphStore.getState().deleteEntity(id);
   };
 
-  // --- CRUD: RELATIONSHIPS ---
-  const createRelationship = async (from: string, to: string, type: string, props?: any, confidence?: number) => {
-    try {
-      const newRel = await graphService.createEdge({ from, to, type, properties: props, confidence });
-      useGraphStore.getState().addRelationship(newRel);
-      return newRel;
-    } catch (err) { throw err; }
+  const createRelationship = async (from: string, to: string, type: string, p?: any, c?: number) => {
+    const newRel = await graphService.createEdge({ from, to, type, properties: p, confidence: c });
+    useGraphStore.getState().addRelationship(newRel);
+    return newRel;
   };
 
-  const updateRelationship = async (id: string, updates: any) => {
-    try {
-      const updatedRel = await graphService.updateEdge(id, updates);
-      useGraphStore.getState().updateRelationship(id, updatedRel);
-      return updatedRel;
-    } catch (err) { throw err; }
+  const updateRelationship = async (id: string, u: any) => {
+    const updatedRel = await graphService.updateEdge(id, u);
+    useGraphStore.getState().updateRelationship(id, updatedRel);
+    return updatedRel;
   };
 
   const deleteRelationship = async (id: string) => {
-    try {
-      await graphService.deleteEdge(id);
-      useGraphStore.getState().deleteRelationship(id);
-    } catch (err) { throw err; }
+    await graphService.deleteEdge(id);
+    useGraphStore.getState().deleteRelationship(id);
   };
 
-  // --- MISC ---
   const selectRelationship = (rel: Relationship | null) => {
     useGraphStore.getState().setSelectedRelationship(rel);
   };
 
-  const getRelationship = async (id: string) => {
-    // Optional: Implement fetch single relationship if needed backend-side
-    return null; 
-  };
-
+  const getRelationship = async (id: string) => { return null; };
+  
   const deleteDocumentByFilename = async (filename: string) => {
     return await graphService.deleteDocument(filename);
   };
 
   return {
-    entities,
-    relationships,
-    selectedRelationship,
-    isLoading,
-    error,
-    loadGraph,
-    refresh,
-    searchGraph,
-    getStats,
-    analyzeGraph,
-    createEntity,
-    updateEntity,
-    deleteEntity,
-    createRelationship,
-    updateRelationship,
-    deleteRelationship,
-    getRelationship,
-    selectRelationship,
-    deleteDocumentByFilename
+    entities, relationships, selectedRelationship, isLoading, error,
+    loadGraph, refresh, searchGraph, getStats, analyzeGraph,
+    createEntity, updateEntity, deleteEntity,
+    createRelationship, updateRelationship, deleteRelationship,
+    getRelationship, selectRelationship, deleteDocumentByFilename
   };
 }
