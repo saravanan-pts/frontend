@@ -46,7 +46,7 @@ export function useGraph() {
         const sourceObj = n.properties || n;
         if (sourceObj && typeof sourceObj === 'object') {
           Object.keys(sourceObj).forEach(k => {
-              if (!['id', 'label', 'T.id', 'T.label'].includes(k)) {
+              if (!['id', 'label', 'T.id', 'T.label', 'source', 'target'].includes(k)) {
                  const val = sourceObj[k];
                  props[k] = Array.isArray(val) ? val[0] : val;
               }
@@ -76,8 +76,11 @@ export function useGraph() {
 
     rawEdges.forEach((e: any) => {
       const id = cleanId(e) || `rel-${Math.random()}`;
-      const from = cleanId(e.from || e.outV);
-      const to = cleanId(e.to || e.inV);
+      
+      // FIXED: Added e.source and e.target to match the Python backend's .project('source', 'target')
+      const from = cleanId(e.source || e.from || e.outV);
+      const to = cleanId(e.target || e.to || e.inV);
+      
       const label = String(e.label || e["T.label"] || "related_to").replace(/['"\[\]]/g, "");
 
       if (validNodeIds.has(from) && validNodeIds.has(to)) {
