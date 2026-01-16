@@ -1,123 +1,190 @@
-import { useState, useCallback } from "react";
+"use client";
+
+import { useCallback, useState } from "react";
 import { useGraphStore } from "@/lib/store";
-import { graphService } from "../services/graphService";
 import type { Entity, Relationship } from "@/types";
 
+// Ensure we target the Backend (Port 8000), not the Frontend (Port 3000)
+// If NEXT_PUBLIC_API_URL is not set in .env, we default to localhost:8000
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 export function useGraph() {
-  const store = useGraphStore();
+  const {
+    entities,
+    relationships,
+    selectedEntity,
+    selectedRelationship,
+    setEntities,
+    setRelationships,
+    addEntity, updateEntity, deleteEntity,
+    addRelationship, updateRelationship, deleteRelationship,
+    setSelectedEntity, setSelectedRelationship,
+    setLoading,
+  } = useGraphStore();
+
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const entities = Array.from(store.entities.values());
-  const relationships = store.relationships;
-  const selectedRelationship = store.selectedRelationship;
+  // --- DATA SANITIZER ---
+  const sanitizeData = (rawNodes: any[], rawEdges: any[]) => {
+    // Helper to clean IDs
+    const cleanId = (val: any): string => {
+      if (!val) return "";
+      // Handle objects being passed as IDs (common in some DB responses)
+      if (typeof val === 'object' && val !== null) {
+        return String(val.id || val["T.id"] || JSON.stringify(val)).replace(/['"\[\]\s]/g, "").toLowerCase().trim();
+      }
+      return String(val).replace(/['"\[\]\s]/g, "").toLowerCase().trim();
+    };
 
-  // --- 1. LOAD DATA ---
-  const loadGraph = useCallback(async (documentId: string | null) => {
+    // Process Nodes
+    const cleanNodes = rawNodes
+      .map((n: any) => {
+        const id = cleanId(n);
+        const label = String(n.label || n["T.label"] || "node").replace(/['"\[\]]/g, "");
+        
+        const props: any = {};
+        const sourceObj = n.properties || n;
+        if (sourceObj && typeof sourceObj === 'object') {
+          Object.keys(sourceObj).forEach(k => {
+              if (!['id', 'label', 'T.id', 'T.label'].includes(k)) {
+                 const val = sourceObj[k];
+                 props[k] = Array.isArray(val) ? val[0] : val;
+              }
+          });
+        }
+
+        return {
+          id,
+          label,
+          type: label,
+          properties: props,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        } as Entity;
+      })
+      .filter(n => {
+        // Filter out invalid IDs
+        if (!n.id || n.id === "manual" || n.id === "null" || n.id === "undefined" || n.id === "[objectobject]") return false;
+        return true;
+      });
+
+    const validNodeIds = new Set(cleanNodes.map(n => n.id));
+
+    // Process Edges
+    const cleanEdges: Relationship[] = [];
+    let dropped = 0;
+
+    rawEdges.forEach((e: any) => {
+      const id = cleanId(e) || `rel-${Math.random()}`;
+      const from = cleanId(e.from || e.outV);
+      const to = cleanId(e.to || e.inV);
+      const label = String(e.label || e["T.label"] || "related_to").replace(/['"\[\]]/g, "");
+
+      if (validNodeIds.has(from) && validNodeIds.has(to)) {
+        cleanEdges.push({
+          id,
+          from,
+          to,
+          type: label,
+          properties: e.properties || {},
+          confidence: 1.0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        } as Relationship);
+      } else {
+        dropped++;
+      }
+    });
+
+    console.log(`[Sanitizer] Raw Nodes: ${rawNodes.length} -> Clean: ${cleanNodes.length}`);
+    console.log(`[Sanitizer] Raw Edges: ${rawEdges.length} -> Clean: ${cleanEdges.length} (Dropped: ${dropped})`);
+    
+    return { cleanNodes, cleanEdges };
+  };
+
+  // --- LOAD GRAPH ---
+  const loadGraph = useCallback(async (documentId?: string | null) => {
+    setLoading(true);
     setIsLoading(true);
-    setError(null);
+    
     try {
-      const { setEntities, setRelationships } = useGraphStore.getState();
+      const url = `${API_URL}/api/graph/fetch`;
+      console.log(`[API] Requesting: POST ${url}`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document_id: documentId }),
+      });
       
-      // Call the API (GET /graph/fetch)
-      const data = await graphService.getAll(documentId);
-      
-      setEntities(data.entities || []);
-      setRelationships(data.relationships || []);
-    } catch (err: any) {
-      console.error("Failed to load graph:", err);
-      setError(err.message || "Failed to load graph");
+      if (!response.ok) {
+        throw new Error(`Backend Error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const rawNodes = data.nodes || data.entities || [];
+      const rawEdges = data.edges || data.relationships || [];
+
+      if (rawNodes.length === 0) {
+        console.warn("[API] Backend returned 0 nodes. Graph is empty.");
+        setEntities([]);
+        setRelationships([]);
+      } else {
+        const { cleanNodes, cleanEdges } = sanitizeData(rawNodes, rawEdges);
+        setEntities(cleanNodes);
+        setRelationships(cleanEdges);
+      }
+
+    } catch (error: any) {
+      console.error("[API] Load failed:", error);
     } finally {
+      setLoading(false);
       setIsLoading(false);
     }
+  }, [setEntities, setRelationships, setLoading]);
+
+  // --- SEARCH & ACTIONS ---
+  const analyzeGraph = useCallback(async () => { return {}; }, []);
+
+  const searchGraph = useCallback(async (query: string) => {
+      try {
+        const response = await fetch(`${API_URL}/api/graph/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query })
+        });
+        if (!response.ok) throw new Error("Search failed");
+        return await response.json();
+      } catch(e) {
+        console.error(e);
+        return { entities: [], relationships: [] };
+      }
   }, []);
 
-  const refresh = useCallback(() => {
-    loadGraph(null);
-  }, [loadGraph]);
-
-  // --- 2. SEARCH (Client-Side Logic) ---
-  const searchGraph = async (query: string, type?: string) => {
-    // Since backend has no search, we filter what we already downloaded
-    const lowerQuery = query.toLowerCase();
-    const allEntities = Array.from(useGraphStore.getState().entities.values());
-    
-    // Filter locally
-    const filtered = allEntities.filter(node => 
-      node.label?.toLowerCase().includes(lowerQuery) ||
-      JSON.stringify(node.properties).toLowerCase().includes(lowerQuery)
-    );
-
-    return { entities: filtered, relationships: [] };
-  };
-
-  // --- 3. STATS (Client-Side Logic) ---
-  const getStats = async () => {
-    // Simply count the data in the store
-    const store = useGraphStore.getState();
-    return {
-        nodeCount: store.entities.size,
-        edgeCount: store.relationships.length,
-        // Add fake stats if UI needs them
-        density: 0,
-        communities: 0
-    };
-  };
-
-  const analyzeGraph = async () => {
-    return await graphService.analyze();
-  };
-
-  // --- CRUD WRAPPERS ---
-  const createEntity = async (e: any) => {
-    const newEntity = await graphService.createNode(e);
-    useGraphStore.getState().addEntity(newEntity);
-    return newEntity;
-  };
-
-  const updateEntity = async (id: string, u: any) => {
-    const updatedEntity = await graphService.updateNode(id, u);
-    useGraphStore.getState().updateEntity(id, updatedEntity);
-    return updatedEntity;
-  };
-
-  const deleteEntity = async (id: string) => {
-    await graphService.deleteNode(id);
-    useGraphStore.getState().deleteEntity(id);
-  };
-
-  const createRelationship = async (from: string, to: string, type: string, p?: any, c?: number) => {
-    const newRel = await graphService.createEdge({ from, to, type, properties: p, confidence: c });
-    useGraphStore.getState().addRelationship(newRel);
-    return newRel;
-  };
-
-  const updateRelationship = async (id: string, u: any) => {
-    const updatedRel = await graphService.updateEdge(id, u);
-    useGraphStore.getState().updateRelationship(id, updatedRel);
-    return updatedRel;
-  };
-
-  const deleteRelationship = async (id: string) => {
-    await graphService.deleteEdge(id);
-    useGraphStore.getState().deleteRelationship(id);
-  };
-
-  const selectRelationship = (rel: Relationship | null) => {
-    useGraphStore.getState().setSelectedRelationship(rel);
-  };
-
-  const getRelationship = async (id: string) => { return null; };
-  
-  const deleteDocumentByFilename = async (filename: string) => {
-    return await graphService.deleteDocument(filename);
-  };
+  // --- STORE STUBS ---
+  const createEntity = useCallback(async (e: any) => e, []);
+  const updateEntityById = useCallback(async (id: string, u: any) => { updateEntity(id, u); return u; }, [updateEntity]);
+  const removeEntity = useCallback(async (id: string) => { deleteEntity(id); }, [deleteEntity]);
+  const createRelationship = useCallback(async (from: string, to: string, type: string, properties?: any, confidence?: number) => { 
+      return { id: "temp", from, to, type, properties: properties || {}, confidence: confidence || 1 } as Relationship; 
+  }, []);
+  const updateRelationshipById = useCallback(async (id: string, u: any) => { updateRelationship(id, u as any); return u; }, [updateRelationship]);
+  const removeRelationship = useCallback(async (id: string) => { deleteRelationship(id); }, [deleteRelationship]);
+  const getRelationshipById = useCallback(async (id: string) => relationships.find(r => r.id === id) || null, [relationships]);
+  const getNeighbors = useCallback(async () => ({ nodes: [], edges: [] }), []);
 
   return {
-    entities, relationships, selectedRelationship, isLoading, error,
-    loadGraph, refresh, searchGraph, getStats, analyzeGraph,
-    createEntity, updateEntity, deleteEntity,
-    createRelationship, updateRelationship, deleteRelationship,
-    getRelationship, selectRelationship, deleteDocumentByFilename
+    entities: Array.from(entities.values()),
+    relationships,
+    selectedEntity, selectedRelationship,
+    loadGraph, 
+    analyzeGraph,
+    searchGraph, 
+    createEntity, updateEntity: updateEntityById, deleteEntity: removeEntity,
+    createRelationship, updateRelationship: updateRelationshipById, deleteRelationship: removeRelationship,
+    getRelationship: getRelationshipById, 
+    getNeighbors,
+    selectEntity: setSelectedEntity, selectRelationship: setSelectedRelationship,
+    isLoading 
   };
 }

@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { RefreshCw, Database, FileText } from "lucide-react";
-import { graphOps } from "@/services/graph-operations";
-import { useSurrealDB } from "@/hooks/useSurrealDB";
+// FIX: Import from useBackend instead of useSurrealDB/useCosmosDB
+import { useBackend } from "@/hooks/useBackend";
 import type { Document } from "@/types";
 
 interface GraphSelectorProps {
@@ -17,37 +17,37 @@ export default function GraphSelector({
   onSelectDocument,
   onRefresh,
 }: GraphSelectorProps) {
-  const { isConnected } = useSurrealDB();
+  // Use the renamed hook
+  const { isConnected } = useBackend();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showDocuments, setShowDocuments] = useState(false);
 
   const loadDocuments = async () => {
+    // Optional: Only check connection if your useBackend hook reliably reports it
     if (!isConnected) {
-      return; // Wait for connection
+       // console.warn("Not connected to DB");
     }
 
     setIsLoading(true);
     try {
-      // Get all documents from database
-      const docs = await graphOps.getAllDocuments();
-      setDocuments(docs.sort((a, b) => 
-        new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
-      ));
-    } catch (error: any) {
-      // Handle errors gracefully - don't show error if it's just not connected yet
-      if (!error?.message?.includes("not connected")) {
-        console.error("Error loading documents:", error);
+      // Fetch directly from your API
+      const response = await fetch('/api/documents');
+      if (response.ok) {
+          const docs = await response.json();
+          setDocuments(docs.sort((a: any, b: any) => 
+            new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
+          ));
       }
+    } catch (error: any) {
+      console.error("Error loading documents:", error);
     } finally {
       setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    if (isConnected) {
-      loadDocuments();
-    }
+    loadDocuments();
   }, [isConnected]);
 
   const handleSelectAll = () => {
@@ -64,7 +64,7 @@ export default function GraphSelector({
     <div className="relative">
       <div className="flex items-center gap-2">
         <button
-          onClick={onRefresh}
+          onClick={() => { onRefresh(); loadDocuments(); }}
           className="p-2 hover:bg-gray-100 rounded"
           title="Refresh graph"
           disabled={isLoading}
@@ -114,11 +114,6 @@ export default function GraphSelector({
             {documents.length === 0 ? (
               <div className="p-4 text-center">
                 <p className="text-sm text-gray-500 mb-2">No documents found</p>
-                {isConnected && (
-                  <p className="text-xs text-gray-400">
-                    You may not have read permissions or the database is empty
-                  </p>
-                )}
               </div>
             ) : (
               <div className="divide-y divide-gray-200">
@@ -150,22 +145,9 @@ export default function GraphSelector({
                 ))}
               </div>
             )}
-            <div className="p-2 border-t border-gray-200">
-              <button
-                onClick={loadDocuments}
-                className="w-full text-left px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 rounded"
-                disabled={isLoading}
-              >
-                <div className="flex items-center gap-2">
-                  <RefreshCw className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`} />
-                  Refresh List
-                </div>
-              </button>
-            </div>
           </div>
         </>
       )}
     </div>
   );
 }
-

@@ -16,12 +16,13 @@ import RelationshipForm from "@/components/RelationshipForm";
 import ContextMenu, { type ContextMenuTarget } from "@/components/ContextMenu";
 import { useGraphStore } from "@/lib/store";
 import { useGraph } from "@/hooks/useGraph";
-// REMOVED: useSurrealDB and surrealdb-client imports
+import { useBackend } from "@/hooks/useBackend"; 
 import { Upload, FileText, Info, Settings, RefreshCw, Trash2 } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
-import { apiClient } from "@/services/apiClient"; // Import API Client for direct calls if needed
 
-// --- HELPER: Robust ID Normalizer ---
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+// --- HELPERS ---
 const getId = (item: any): string => {
   if (!item) return "";
   if (typeof item === 'string') return item;
@@ -29,7 +30,6 @@ const getId = (item: any): string => {
   return String(item);
 };
 
-// --- HELPER: Strip Table Prefix (e.g., "person:123" -> "123") ---
 const stripId = (id: string): string => {
   if (!id) return "";
   return id.includes(':') ? id.split(':').pop()! : id;
@@ -41,13 +41,13 @@ export default function Home() {
   // Store hooks
   const { activeTab, setActiveTab, setSelectedEntity, selectedEntity } = useGraphStore();
 
-  // Graph hooks (Master Data)
+  // Graph hooks
   const {
     entities,
     relationships, 
     loadGraph,
     analyzeGraph,
-    searchGraph, // Use the hook's search capability
+    searchGraph, // Ensure useGraph returns this
     createEntity,
     updateEntity,
     deleteEntity,
@@ -56,7 +56,8 @@ export default function Home() {
     deleteRelationship
   } = useGraph();
 
-  // REMOVED: useSurrealDB hook
+  const isConnected = true; 
+
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<any[]>([]);
@@ -67,7 +68,11 @@ export default function Home() {
   const [viewEntities, setViewEntities] = useState<Entity[]>([]);
   const [viewRelationships, setViewRelationships] = useState<Relationship[]>([]);
 
-  // REMOVED: Namespace/Database state (Backend manages this now)
+  // Namespace & Database State
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [selectedNamespace, setSelectedNamespace] = useState<string>("");
+  const [selectedDatabase, setSelectedDatabase] = useState<string>("");
 
   // Modal states
   const [showEntityForm, setShowEntityForm] = useState(false);
@@ -88,21 +93,28 @@ export default function Home() {
   const stableEntities = useMemo(() => entities, [entities.length, entities[0]?.id]);
   const stableRelationships = useMemo(() => relationships, [relationships.length, relationships[0]?.id]);
 
-  // --- FIX: VIRTUALIZATION & SMART LINKING ---
+  // --- VIRTUALIZATION (Top 150) ---
   useEffect(() => {
     if (stableEntities.length === 0) {
-        if (viewEntities.length > 0) {
-            setViewEntities([]);
-            setViewRelationships([]);
-        }
-        return;
+      if (viewEntities.length > 0) {
+        setViewEntities([]);
+        setViewRelationships([]);
+      }
+      return;
     }
 
     const timer = setTimeout(() => {
-        const initialNodes = stableEntities.slice(0, 100);
-        
+        const nodesToShow = stableEntities.slice(0, 150);
+
+        if (selectedEntity) {
+            const isVisible = nodesToShow.some(n => getId(n) === getId(selectedEntity));
+            if (!isVisible) {
+                nodesToShow.push(selectedEntity);
+            }
+        }
+
         const nodeLookup = new Map<string, string>();
-        initialNodes.forEach(node => {
+        nodesToShow.forEach(node => {
             const fullId = getId(node);
             nodeLookup.set(fullId, fullId);
             nodeLookup.set(stripId(fullId), fullId);
@@ -110,7 +122,8 @@ export default function Home() {
 
         const validEdges: Relationship[] = [];
 
-        stableRelationships.forEach(r => {
+        stableRelationships.forEach(rel => {
+            const r = rel as any;
             const rawSource = getId(r.from || r.in || r.source);
             const rawTarget = getId(r.to || r.out || r.target);
 
@@ -119,38 +132,58 @@ export default function Home() {
 
             if (sourceMatch && targetMatch) {
                 validEdges.push({
-                    ...r,
-                    source: sourceMatch,
-                    target: targetMatch,
+                    ...rel,
                     from: sourceMatch,
                     to: targetMatch
                 });
             }
         });
 
-        setViewEntities(initialNodes);
+        setViewEntities(nodesToShow);
         setViewRelationships(validEdges);
-    }, 10); 
+    }, 10);
 
     return () => clearTimeout(timer);
 
-  }, [stableEntities, stableRelationships]); 
+  }, [stableEntities, stableRelationships, selectedEntity]);
 
-  // Memoize view data
   const stableViewEntities = useMemo(() => viewEntities, [viewEntities]);
   const stableViewRelationships = useMemo(() => viewRelationships, [viewRelationships]);
 
-  // --- DOCUMENTS LOGIC ---
+  // --- NAMESPACE LOGIC ---
+  const fetchNamespaces = useCallback(async () => {
+    try {
+      setNamespaces(["AzureCosmosDB"]);
+      setSelectedNamespace("AzureCosmosDB");
+    } catch (e) { console.error("Failed to fetch namespaces", e); }
+  }, []);
+
+  const fetchDatabases = useCallback(async (ns: string) => {
+    if (!ns) { setDatabases([]); return; }
+    try {
+      setDatabases(["GraphDB"]); 
+      setSelectedDatabase("GraphDB");
+    } catch (e) { console.error("Failed to fetch databases", e); }
+  }, []);
+
+  const handleNamespaceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newNs = e.target.value;
+    setSelectedNamespace(newNs);
+    if (newNs) fetchDatabases(newNs);
+  };
+
+  const handleDatabaseChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newDb = e.target.value;
+    setSelectedDatabase(newDb);
+    toast.success(`Active Database: ${newDb}`);
+    fetchDocuments();
+  };
+
   const fetchDocuments = async () => {
     try {
-      // UPDATED: Use apiClient to fetch from Backend (Repo B) directly
-      // Assuming Backend has GET /documents. If not, this might need adjustment.
-      const res = await apiClient.get("/documents"); 
-      setDocuments(res.data);
-    } catch (e) { 
-        // Silent fail or log
-        console.error("Failed to fetch documents (Backend might not support listing yet)", e); 
-    }
+        const res = await fetch(`${API_URL}/api/documents`); 
+        if (res.ok) setDocuments(await res.json());
+    } catch (e) { console.error("Failed to fetch documents:", e); }
   };
 
   // Initial Load
@@ -159,12 +192,13 @@ export default function Home() {
       try {
         await fetchDocuments();
         await loadGraph(selectedDocumentId || null);
+        if (isConnected) fetchNamespaces();
       }
       catch (e) { console.error("Initialization error:", e); }
       finally { setIsInitialLoad(false); }
     };
     init();
-  }, [loadGraph]);
+  }, [loadGraph, isConnected, fetchNamespaces]);
 
   useEffect(() => {
     if (!isInitialLoad) loadGraph(selectedDocumentId).catch(console.error);
@@ -196,89 +230,50 @@ export default function Home() {
   const handleSearch = async (query: string) => {
     const term = query.toLowerCase().trim();
 
-    // Reset to Top 100
     if (!term) {
-      const limit = 100;
-      const initialNodes = stableEntities.slice(0, limit);
-      // ... (Rest logic for reset is same as useEffect, omitted for brevity but logic holds)
-      // For simplicity, re-triggering the main effect by updating view
-      setViewEntities(initialNodes);
-      // Re-calculate edges (simplified for this snippet)
-      const validEdges: Relationship[] = []; // Re-run edge logic if strictly needed here
-      setViewRelationships(validEdges); 
-      
       if (graphRef.current) {
         graphRef.current.searchAndHighlight("");
         graphRef.current.fit();
       }
+      setSelectedEntity(null);
       return;
     }
 
-    // 1. Search Local Master Data First
     const match = stableEntities.find(e => (e.label || "").toLowerCase().includes(term));
 
     if (match) {
-        // ... (Existing Logic for expanding neighbors locally) ...
-        // We keep the existing logic because it's good client-side UX
-        const matchId = getId(match);
-        const neighbors = new Set<string>();
-        neighbors.add(matchId);
-        
-        const relatedEdges = stableRelationships.filter(r => {
-             const s = getId(r.from || r.in || r.source);
-             const t = getId(r.to || r.out || r.target);
-             return s === matchId || t === matchId || stripId(s) === stripId(matchId) || stripId(t) === stripId(matchId);
-        });
+      toast.success(`Found: ${match.label}`);
+      setSelectedEntity(match);
+      setActiveTab("details");
+      
+      setTimeout(() => {
+          if (graphRef.current) graphRef.current.searchAndHighlight(query);
+      }, 100);
 
-        relatedEdges.forEach(r => {
-             neighbors.add(getId(r.from || r.in || r.source));
-             neighbors.add(getId(r.to || r.out || r.target));
-        });
-
-        const newNodes = stableEntities.filter(e => {
-            const id = getId(e);
-            return neighbors.has(id) || neighbors.has(stripId(id));
-        });
-
-        // Simplified edge reconstruction
-        const newEdges = stableRelationships.filter(r => {
-             const s = getId(r.from || r.in || r.source);
-             const t = getId(r.to || r.out || r.target);
-             // Check if both ends are in newNodes
-             const sIn = newNodes.some(n => getId(n) === s || stripId(getId(n)) === stripId(s));
-             const tIn = newNodes.some(n => getId(n) === t || stripId(getId(n)) === stripId(t));
-             return sIn && tIn;
-        });
-
-        setViewEntities(newNodes);
-        setViewRelationships(newEdges);
-        toast.success(`Found locally: ${match.label}`);
-        setSelectedEntity(match);
-        setActiveTab("details");
     } else {
-      // 2. Fallback: Global Search via Hook
       try {
-        // UPDATED: Use the hook's search capability which uses the service
-        const result = await searchGraph(term);
+        const result = await searchGraph(term); 
         
-        if (result && result.entities && result.entities.length > 0) {
-            const newEntities = result.entities;
-            const newRels = result.relationships || [];
+        const newEntities = result?.entities || [];
+        const newRels = result?.relationships || [];
 
-            const { addEntity, addRelationship } = useGraphStore.getState();
-            newEntities.forEach((e: Entity) => addEntity(e));
-            newRels.forEach((r: Relationship) => addRelationship(r));
+        if (newEntities.length > 0) {
+          const { addEntity, addRelationship } = useGraphStore.getState();
+          newEntities.forEach((e: Entity) => addEntity(e));
+          newRels.forEach((r: Relationship) => addRelationship(r));
 
-            setViewEntities(prev => [...prev, ...newEntities]);
-            setViewRelationships(prev => [...prev, ...newRels]);
-
-            toast.success(`Found via API: ${term}`);
+          const newMatch = newEntities.find((e: Entity) => (e.label || "").toLowerCase().includes(term));
+          if (newMatch) {
+            toast.success(`Found in database: ${newMatch.label}`);
+            setSelectedEntity(newMatch);
+            setActiveTab("details");
+            setTimeout(() => { if (graphRef.current) graphRef.current.searchAndHighlight(query); }, 200); 
+          }
         } else {
-            toast.error("Not found.");
+          toast.error("Node not found.");
         }
       } catch (error) {
-        toast.error("Search failed.");
-        console.error(error);
+        toast.error("Global search error");
       }
     }
   };
@@ -291,13 +286,18 @@ export default function Home() {
 
     setIsDeleting(true);
     try {
-      // UPDATED: Use apiClient directly
-      await apiClient.delete('/documents', { data: { filename: doc.filename } });
-      
-      toast.success("File deleted");
-      setDocuments(prev => prev.filter(d => d.id !== selectedDocumentId));
-      setSelectedDocumentId(null);
-      await loadGraph(null);
+      const response = await fetch(`${API_URL}/api/documents`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: doc.filename }),
+      });
+
+      if (response.ok) {
+        toast.success("File deleted");
+        setDocuments(prev => prev.filter(d => d.id !== selectedDocumentId));
+        setSelectedDocumentId(null);
+        await loadGraph(null);
+      } else throw new Error("Delete failed");
     } catch (e) { toast.error("Failed to delete file"); }
     finally { setIsDeleting(false); }
   };
@@ -353,6 +353,7 @@ export default function Home() {
     if (graphRef.current) graphRef.current.fit();
     fetchDocuments();
     loadGraph(selectedDocumentId);
+    if (isConnected) fetchNamespaces();
   };
 
   const toggleEntityFilter = (type: string) => setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
@@ -386,6 +387,7 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <h2 className="text-xl font-semibold text-gray-800">Knowledge Graph POC</h2>
               <button onClick={handleForceRefresh} className="p-1 hover:bg-gray-100 rounded-full" title="Reload"><RefreshCw className="w-4 h-4 text-gray-400" /></button>
+              <div className={`w-3 h-3 rounded-full ${isConnected ? "bg-green-500" : "bg-gray-400"}`} title={isConnected ? "Connected" : "Disconnected"} />
             </div>
             <div className="text-sm text-gray-600">
               {viewEntities.length < stableEntities.length ?
@@ -398,11 +400,19 @@ export default function Home() {
           <div className="flex-1 flex flex-row overflow-hidden bg-gray-50">
             <div className="flex-1 flex flex-col min-w-0">
               <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-end gap-3">
-                {/* REMOVED: Namespace/DB Selectors */}
+                <select value={selectedNamespace} onChange={handleNamespaceChange} className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px]">
+                  <option value="">Select NS</option>
+                  {namespaces.map(ns => <option key={ns} value={ns}>{ns}</option>)}
+                </select>
+                <select value={selectedDatabase} onChange={handleDatabaseChange} disabled={!selectedNamespace} className="p-2 border border-gray-300 rounded-md text-sm min-w-[120px] disabled:bg-gray-100 disabled:text-gray-400">
+                  <option value="">Select DB</option>
+                  {databases.map(db => <option key={db} value={db}>{db}</option>)}
+                </select>
+                <div className="h-6 w-px bg-gray-300 mx-1"></div>
                 <div className="flex items-center gap-2 max-w-md w-full">
                   <select value={selectedDocumentId || ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)} className="flex-1 p-2 border border-gray-300 rounded-md text-sm">
                     <option value="">-- Load All / Select File --</option>
-                    {documents.map((doc) => <option key={doc.id || doc.filename} value={doc.id}>{doc.filename}</option>)}
+                    {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.filename} ({doc.entityCount} nodes)</option>)}
                   </select>
                   <button onClick={handleDeleteFile} disabled={!selectedDocumentId || isDeleting} className="p-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-md disabled:opacity-50 border border-red-200"><Trash2 className="w-4 h-4" /></button>
                 </div>
@@ -427,7 +437,10 @@ export default function Home() {
                       ref={graphRef}
                       entities={stableViewEntities}
                       relationships={stableViewRelationships}
-                      onNodeSelect={(id) => { const e = stableEntities.find(x => getId(x) === id); if (e) { setSelectedEntity(e); setActiveTab("details"); } }}
+                      onNodeSelect={(id) => { 
+                          const e = stableEntities.find(x => getId(x) === id); 
+                          if (e) { setSelectedEntity(e); setActiveTab("details"); }
+                      }}
                       onNodeDeselect={() => setSelectedEntity(null)}
                       onContextMenu={(x, y, t, n, e) => setContextMenu({ x, y, target: t, nodeId: n, edgeId: e })}
                       onCreateNode={handleCreateNode}

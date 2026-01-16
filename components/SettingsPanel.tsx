@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Settings, Download, Upload, Trash2, Moon, Sun, Activity, Server } from "lucide-react";
+import { useState } from "react";
+import { Settings, Download, Upload, Trash2, Moon, Sun, Activity, Server, RefreshCw } from "lucide-react";
 import { useGraphStore } from "@/lib/store";
 import { useGraph } from "@/hooks/useGraph";
-import { apiClient } from "@/services/apiClient"; // Import new API client
+import { useBackend } from "@/hooks/useBackend"; // Import the hook
+import { apiClient } from "@/services/apiClient"; 
 import AlertDialog from "@/components/AlertDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
 
@@ -12,32 +13,15 @@ export default function SettingsPanel() {
   const { clearGraph } = useGraphStore();
   const { loadGraph } = useGraph();
   
-  // REMOVED: useSurrealDB hook
-  // ADDED: Local state for Backend Health
-  const [backendStatus, setBackendStatus] = useState<"connected" | "disconnected" | "checking">("checking");
+  // MERGED: Use the centralized backend hook for status
+  const { isConnected, checkHealth } = useBackend();
+  
   const [darkMode, setDarkMode] = useState(false);
   
   // Dialog states
   const [showImportAlert, setShowImportAlert] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-
-  // --- HEALTH CHECK ---
-  const checkBackendHealth = async () => {
-    setBackendStatus("checking");
-    try {
-      // Pings the backend health endpoint (defined in main.py)
-      await apiClient.get("/health"); 
-      setBackendStatus("connected");
-    } catch (error) {
-      console.error("Backend health check failed:", error);
-      setBackendStatus("disconnected");
-    }
-  };
-
-  // Check health on mount
-  useEffect(() => {
-    checkBackendHealth();
-  }, []);
+  const [isClearing, setIsClearing] = useState(false);
 
   const handleExportGraph = () => {
     const { entities, relationships } = useGraphStore.getState();
@@ -69,9 +53,7 @@ export default function SettingsPanel() {
         const data = JSON.parse(text);
 
         if (data.entities && data.relationships) {
-          // In a real app, you might send this to the backend to bulk insert
-          // For now, we rely on the store reloading or client-side hydration
-          // await loadGraph(); 
+          // Future: Add backend bulk insert here if needed
           setShowImportAlert({ type: "success", message: "Graph imported successfully (Client Side)" });
         } else {
           setShowImportAlert({ type: "error", message: "Invalid graph file format" });
@@ -87,10 +69,25 @@ export default function SettingsPanel() {
     setShowClearConfirm(true);
   };
 
-  const confirmClearAll = () => {
-    clearGraph();
-    setShowClearConfirm(false);
-    setShowImportAlert({ type: "success", message: "Graph data cleared" });
+  // UPDATED: Clear both Backend (DB) and Frontend (Store)
+  const confirmClearAll = async () => {
+    setIsClearing(true);
+    try {
+      // 1. Clear Backend Database
+      await apiClient.post("/clear"); 
+      
+      // 2. Clear Frontend Store
+      clearGraph();
+      
+      setShowClearConfirm(false);
+      setShowImportAlert({ type: "success", message: "Database and local graph cleared successfully" });
+    } catch (error) {
+      setShowClearConfirm(false);
+      setShowImportAlert({ type: "error", message: "Failed to clear backend database. Check connection." });
+      console.error("Clear failed:", error);
+    } finally {
+      setIsClearing(false);
+    }
   };
 
   const toggleDarkMode = () => {
@@ -119,20 +116,18 @@ export default function SettingsPanel() {
             <span className="text-gray-600">Backend API:</span>
             <span
               className={`font-medium flex items-center gap-1 ${
-                backendStatus === "connected" ? "text-green-600" : 
-                backendStatus === "disconnected" ? "text-red-600" : "text-yellow-600"
+                isConnected ? "text-green-600" : "text-red-600"
               }`}
             >
-              {backendStatus === "connected" && <Activity className="w-3 h-3" />}
-              {backendStatus === "connected" ? "Online" : 
-               backendStatus === "disconnected" ? "Offline" : "Checking..."}
+              {isConnected ? <Activity className="w-3 h-3" /> : <Activity className="w-3 h-3 animate-pulse" />}
+              {isConnected ? "Online" : "Offline / Connecting..."}
             </span>
           </div>
           
           <div className="flex items-center justify-between">
             <span className="text-gray-600">API URL:</span>
             <span className="text-gray-800 font-mono text-xs bg-gray-200 px-2 py-1 rounded">
-               {process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000"}
+                {process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}
             </span>
           </div>
 
@@ -141,9 +136,10 @@ export default function SettingsPanel() {
           </div>
 
           <button
-            onClick={checkBackendHealth}
-            className="w-full mt-3 px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded text-sm hover:bg-gray-50 transition-colors"
+            onClick={checkHealth}
+            className="w-full mt-3 px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded text-sm hover:bg-gray-50 transition-colors flex justify-center items-center gap-2"
           >
+            <RefreshCw className="w-3 h-3" />
             Refresh Status
           </button>
         </div>
@@ -189,7 +185,12 @@ export default function SettingsPanel() {
           </button>
           <button
             onClick={handleClearAll}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded hover:bg-red-100 transition-colors"
+            disabled={!isConnected}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2 border rounded transition-colors ${
+              !isConnected 
+                ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                : "bg-red-50 text-red-600 border-red-200 hover:bg-red-100"
+            }`}
           >
             <Trash2 className="w-4 h-4" />
             Clear All Data
@@ -210,8 +211,8 @@ export default function SettingsPanel() {
       {showClearConfirm && (
         <ConfirmDialog
           title="Clear All Data"
-          message="Are you sure you want to clear all graph data? This action cannot be undone."
-          confirmText="Clear"
+          message="Are you sure you want to clear all graph data from the Database? This action cannot be undone."
+          confirmText={isClearing ? "Clearing..." : "Clear"}
           cancelText="Cancel"
           onConfirm={confirmClearAll}
           onCancel={() => setShowClearConfirm(false)}
