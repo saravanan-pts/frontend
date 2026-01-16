@@ -21,7 +21,6 @@ import type { Entity, Relationship } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// --- HELPERS ---
 const getId = (item: any): string => {
   if (!item) return "";
   if (typeof item === 'string') return item;
@@ -71,7 +70,7 @@ export default function Home() {
       return;
     }
     const timer = setTimeout(() => {
-        const nodesToShow = stableEntities.slice(0, 150);
+        const nodesToShow = stableEntities.slice(0, 150); // Show more nodes if needed
         if (selectedEntity) {
             const isVisible = nodesToShow.some(n => getId(n) === getId(selectedEntity));
             if (!isVisible) nodesToShow.push(selectedEntity);
@@ -115,15 +114,33 @@ export default function Home() {
   const handleDatabaseChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newDb = e.target.value; setSelectedDatabase(newDb); toast.success(`Active Database: ${newDb}`); fetchDocuments();
   };
+
   const fetchDocuments = async () => {
-    try { const res = await fetch(`${API_URL}/api/documents`); if (res.ok) setDocuments(await res.json()); } catch (e) { console.error(e); }
+    try { 
+      const res = await fetch(`${API_URL}/api/documents`); 
+      if (res.ok) { 
+        const data = await res.json();
+        const docsArray = Array.isArray(data) ? data : (data.files || []);
+        setDocuments(docsArray); 
+      } 
+    } catch (e) { 
+      console.error(e); 
+      setDocuments([]); 
+    }
   };
 
   useEffect(() => {
     const init = async () => { try { await fetchDocuments(); await loadGraph(selectedDocumentId || null); if (isConnected) fetchNamespaces(); } catch (e) { console.error(e); } finally { setIsInitialLoad(false); } };
     init();
   }, [loadGraph, isConnected, fetchNamespaces]);
-  useEffect(() => { if (!isInitialLoad) loadGraph(selectedDocumentId).catch(console.error); }, [selectedDocumentId, loadGraph]);
+  
+  // Reload graph when document selection changes
+  useEffect(() => { 
+      if (!isInitialLoad) {
+          loadGraph(selectedDocumentId).catch(console.error); 
+          if(graphRef.current) graphRef.current.resetZoom();
+      }
+  }, [selectedDocumentId, loadGraph]);
 
   useEffect(() => {
     if (stableEntities.length > 0) {
@@ -137,6 +154,7 @@ export default function Home() {
       setSelectedRelFilters(prev => (prev.length === 0 ? rTypes : prev));
     }
   }, [stableEntities, stableRelationships]);
+  
   useEffect(() => { if (graphRef.current) { graphRef.current.filterByType(selectedEntityFilters); graphRef.current.filterByRelationship(selectedRelFilters); } }, [selectedEntityFilters, selectedRelFilters]);
 
   const handleSearch = async (query: string) => {
@@ -180,15 +198,10 @@ export default function Home() {
 
   return (
     <ErrorBoundary>
-      {/* Main Layout - Deep Dark Background */}
       <div className="min-h-screen bg-[#020617] flex flex-col md:flex-row overflow-hidden text-[#F8FAFC]">
-        
-        {/* Leftmost Sidebar (Navigation) - Slate Navy */}
         <div className="hidden md:block bg-[#0F172A] border-r border-[#334155]">
             <MainSidebar />
         </div>
-
-        {/* Filter Panel (Left Inner) - Slate Navy */}
         {isFilterPanelOpen && (
           <div className="hidden md:block border-r border-[#334155] bg-[#0F172A]">
             <FilterPanel
@@ -199,10 +212,7 @@ export default function Home() {
             />
           </div>
         )}
-
-        {/* Center Content */}
         <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#020617]">
-          {/* Header */}
           <header className="bg-[#0F172A] border-b border-[#334155] shadow-sm z-20 px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <h2 className="text-xl font-semibold text-white">Knowledge Graph POC</h2>
@@ -213,13 +223,9 @@ export default function Home() {
               {viewEntities.length < stableEntities.length ? `Viewing ${viewEntities.length} of ${stableEntities.length}` : `${stableEntities.length} entities`}
             </div>
           </header>
-
           <div className="flex-1 flex flex-row overflow-hidden">
             <div className="flex-1 flex flex-col min-w-0">
-              
-              {/* Controls Bar */}
               <div className="bg-[#0F172A] border-b border-[#334155] px-4 py-2 flex items-center justify-end gap-3">
-                {/* Selectors - Dark Card Style */}
                 <select value={selectedNamespace} onChange={handleNamespaceChange} className="p-2 border border-[#334155] bg-[#1E293B] text-white rounded-md text-sm min-w-[120px] focus:ring-2 focus:ring-[#2563EB]">
                   <option value="">Select NS</option>
                   {namespaces.map(ns => <option key={ns} value={ns}>{ns}</option>)}
@@ -228,9 +234,7 @@ export default function Home() {
                   <option value="">Select DB</option>
                   {databases.map(db => <option key={db} value={db}>{db}</option>)}
                 </select>
-                
                 <div className="h-6 w-px bg-[#334155] mx-1"></div>
-                
                 <div className="flex items-center gap-2 max-w-md w-full">
                   <select value={selectedDocumentId || ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)} className="flex-1 p-2 border border-[#334155] bg-[#1E293B] text-white rounded-md text-sm">
                     <option value="">-- Load All / Select File --</option>
@@ -239,7 +243,6 @@ export default function Home() {
                   <button onClick={handleDeleteFile} disabled={!selectedDocumentId || isDeleting} className="p-2 text-red-400 bg-[#1E293B] hover:bg-[#334155] rounded-md disabled:opacity-50 border border-[#334155] transition-colors"><Trash2 className="w-4 h-4" /></button>
                 </div>
               </div>
-
               <GraphControls
                 graphRef={graphRef}
                 onCreateNode={handleCreateNode}
@@ -249,16 +252,16 @@ export default function Home() {
                 isFilterPanelOpen={isFilterPanelOpen}
                 onToggleFilterPanel={() => setIsFilterPanelOpen(true)}
               />
-
-              <div className="flex-1 relative p-4 bg-[#020617]">
+              <div className="flex-1 relative p-0 bg-[#020617]">
                 {isInitialLoad ? (
                   <div className="absolute inset-0 flex items-center justify-center"><p className="text-[#94A3B8]">Loading...</p></div>
                 ) : (
-                  <div className="bg-[#020617] rounded-lg shadow-sm border border-[#334155] h-full overflow-hidden">
+                  <div className="absolute inset-0 overflow-hidden">
                     <GraphVisualization
                       ref={graphRef}
                       entities={stableViewEntities}
                       relationships={stableViewRelationships}
+                      selectedDocumentId={selectedDocumentId} // PASSED HERE
                       onNodeSelect={(id) => { const e = stableEntities.find(x => getId(x) === id); if (e) { setSelectedEntity(e); setActiveTab("details"); } }}
                       onNodeDeselect={() => setSelectedEntity(null)}
                       onContextMenu={(x, y, t, n, e) => setContextMenu({ x, y, target: t, nodeId: n, edgeId: e })}
@@ -269,13 +272,10 @@ export default function Home() {
                 )}
               </div>
             </div>
-
-            {/* Right Sidebar (Tabs) - Slate Navy */}
             <div className="w-80 lg:w-96 bg-[#0F172A] border-l border-[#334155] flex flex-col z-10">
               <div className="flex border-b border-[#334155] overflow-x-auto">
                 {tabs.map((tab: any) => {
                   const Icon = tab.icon;
-                  // Active Tab is GenUI Blue (#2563EB), Inactive is Muted Gray
                   return (
                     <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex-1 min-w-[60px] flex items-center justify-center gap-1 py-3 text-xs lg:text-sm font-medium transition-colors ${activeTab === tab.id ? "text-[#2563EB] border-b-2 border-[#2563EB] bg-[#1E293B]" : "text-[#94A3B8] hover:bg-[#1E293B]"}`}>
                       <Icon className="w-4 h-4" /> <span className="hidden sm:inline">{tab.label}</span>
@@ -292,7 +292,6 @@ export default function Home() {
             </div>
           </div>
         </div>
-
         {showEntityForm && <EntityForm entity={editingEntity || undefined} existingTypes={allEntityTypes} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
         {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={stableEntities} existingRelationships={stableRelationships} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
         {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} target={contextMenu.target} onCreateNode={handleCreateNode} onEditNode={() => handleEditNode(contextMenu.nodeId)} onDeleteNode={() => handleDeleteNode(contextMenu.nodeId)} onCreateRelationship={() => handleCreateRelationship(contextMenu.nodeId)} onEditEdge={() => handleEditRelationship(contextMenu.edgeId)} onDeleteEdge={() => handleDeleteRelationship(contextMenu.edgeId)} onClose={() => setContextMenu(null)} />}
