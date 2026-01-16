@@ -3,26 +3,85 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --genui-main: #020617;    /* Deep Background */
+  --genui-sidebar: #0F172A; /* Sidebar/Header */
+  --genui-card: #1E293B;    /* Cards/Inputs */
+  --genui-border: #334155;  /* Borders */
+  --genui-text: #F8FAFC;    /* Main Text */
+  --genui-muted: #94A3B8;   /* Secondary Text */
+  --genui-blue: #2563EB;    /* Primary Action */
+  --genui-purple: #7C3AED;  /* AI Action */
+  --genui-green: #10B981;   /* Success Action */
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--genui-main);
+  color: var(--genui-text);
+  font-family: 'Inter', system-ui, sans-serif;
+  overflow: hidden;
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
+/* --- GENUI COMPONENT OVERRIDES --- */
+
+/* 1. Force Inputs & Selects to be Dark */
+input, select, textarea {
+  background-color: var(--genui-card) !important;
+  border-color: var(--genui-border) !important;
+  color: var(--genui-text) !important;
 }
 
+/* 2. Force standard panels to be Dark */
+.bg-white, .bg-gray-50, .bg-gray-100 {
+  background-color: var(--genui-sidebar) !important;
+  color: var(--genui-text) !important;
+  border-color: var(--genui-border) !important;
+}
+
+/* 3. Fix Text Colors */
+.text-gray-900, .text-gray-800, .text-black {
+  color: #F8FAFC !important;
+}
+.text-gray-600, .text-gray-500 {
+  color: #94A3B8 !important;
+}
+
+/* 4. BUTTON STYLES (Matching GenUI) */
+
+/* Primary Blue Buttons (Add Node) */
+button[class*="bg-blue"] {
+  background-color: var(--genui-blue) !important;
+  color: white !important;
+  border: none !important;
+  box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);
+}
+
+/* Secondary/Green Buttons (Add Edge) */
+/* In GenUI, secondary actions are often dark with a border, or distinct colors */
+button[class*="bg-green"] {
+  background-color: var(--genui-card) !important; /* Dark background */
+  border: 1px solid var(--genui-green) !important; /* Green Border */
+  color: var(--genui-green) !important; /* Green Text */
+}
+button[class*="bg-green"]:hover {
+  background-color: rgba(16, 185, 129, 0.1) !important;
+}
+
+/* AI/Analyze Buttons (Purple) */
+button[class*="bg-purple"], button[class*="bg-violet"] {
+  background-color: var(--genui-purple) !important;
+  color: white !important;
+  box-shadow: 0 0 15px rgba(124, 58, 237, 0.4); /* Glow effect */
+}
+
+/* Red/Delete Buttons */
+button[class*="text-red"] {
+  background-color: rgba(239, 68, 68, 0.1) !important;
+  border-color: rgba(239, 68, 68, 0.3) !important;
+  color: #FCA5A5 !important;
+}
+
+/* 5. Scrollbar Styling */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--genui-main); }
+::-webkit-scrollbar-thumb { background: var(--genui-card); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--genui-border); }

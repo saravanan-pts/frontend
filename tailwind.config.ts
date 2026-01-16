@@ -9,12 +9,20 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "var(--background)",
-        foreground: "var(--foreground)",
+        // GenUI Theme Palette
+        genui: {
+          main: "#020617",    // Deepest background (Canvas)
+          sidebar: "#0F172A", // Sidebars and Headers
+          card: "#1E293B",    // Inputs, Panels, Modals
+          border: "#334155",  // Borders
+          text: "#F8FAFC",    // Primary White Text
+          muted: "#94A3B8",   // Secondary Gray Text
+          accent: "#2563EB",  // Active Blue
+          purple: "#7C3AED",  // AI/Analysis Highlight
+        },
       },
     },
   },
   plugins: [],
 };
 export default config;
-

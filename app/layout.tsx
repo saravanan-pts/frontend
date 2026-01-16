@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Knowledge Graph POC",
-  description: "Interactive knowledge graph visualization with SurrealDB and Azure OpenAI",
+  title: "GenUI Knowledge Graph",
+  description: "Interactive knowledge graph visualization",
 };
 
 export default function RootLayout({
@@ -13,8 +13,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      {/* Applied GenUI base classes here */}
+      <body className="bg-genui-main text-genui-text h-screen w-screen overflow-hidden flex">
+        {children}
+      </body>
     </html>
   );
 }
-
