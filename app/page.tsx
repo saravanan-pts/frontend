@@ -133,15 +133,33 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [stableEntities, stableRelationships, selectedEntity]);
 
-  // --- 3. FILTER LOGIC (Backend Driven) ---
+  // --- 3. FILTER LOGIC (Aggressive Deduplication) ---
   useEffect(() => {
     if (stableEntities.length > 0) {
-      // Backend now sends normalized "type", so we just use it directly
-      const types = Array.from(new Set(stableEntities.map(e => e.type || "Concept"))).sort();
+      // 1. Get all raw types
+      const rawTypes = stableEntities.map(e => e.type || "Concept");
       
-      setAllEntityTypes(prev => JSON.stringify(prev) === JSON.stringify(types) ? prev : types);
-      // If filters empty, select all
-      setSelectedEntityFilters(prev => prev.length === 0 ? types : prev);
+      // 2. Create a Set to remove duplicates
+      const typeSet = new Set<string>();
+      
+      rawTypes.forEach(t => {
+          // Force string, trim whitespace, and normalize case
+          const clean = String(t).trim(); 
+          if (clean) {
+              // Capitalize first letter (e.g. "activity" -> "Activity")
+              const formatted = clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
+              typeSet.add(formatted);
+          }
+      });
+
+      // 3. Convert Set back to Array and Sort
+      const uniqueTypes = Array.from(typeSet).sort();
+      
+      // Update state only if changed to prevent loops
+      setAllEntityTypes(prev => JSON.stringify(prev) === JSON.stringify(uniqueTypes) ? prev : uniqueTypes);
+      
+      // Default: Select all types if none selected
+      setSelectedEntityFilters(prev => prev.length === 0 ? uniqueTypes : prev);
     }
 
     if (stableRelationships.length > 0) {
@@ -332,7 +350,7 @@ export default function Home() {
                 <div className="flex items-center gap-2 max-w-md w-full">
                   <select value={selectedDocumentId || ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)} className="flex-1 p-2 border border-[#334155] bg-[#1E293B] text-white rounded-md text-sm">
                     <option value="">-- Load All / Select File --</option>
-                    {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.filename} ({doc.entityCount} nodes)</option>)}
+                    {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.filename} ({doc.entityCount} nodes{doc.relationCount ? `, ${doc.relationCount} edges` : ''})</option>)}
                   </select>
                   <button onClick={handleDeleteFile} disabled={!selectedDocumentId || isDeleting} className="p-2 text-red-400 bg-[#1E293B] hover:bg-[#334155] rounded-md disabled:opacity-50 border border-[#334155] transition-colors"><Trash2 className="w-4 h-4" /></button>
                 </div>
