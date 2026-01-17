@@ -1,6 +1,6 @@
 {
-  "name": "surrealdb-poc-v1",
-  "version": "0.1.0",
+  "name": "knowledge-graph-frontend",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3111",
@@ -13,9 +13,8 @@
     "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
-    "@azure/openai": "^1.0.0-beta.2",
     "axios": "^1.13.2",
-    "cytoscape": "^3.31.0",
+    "cytoscape": "^3.33.1",
     "cytoscape-cola": "^2.5.1",
     "cytoscape-dagre": "^2.5.0",
     "cytoscape-fcose": "^2.2.0",
@@ -26,15 +25,17 @@
     "papaparse": "^5.4.1",
     "pdf-parse": "^1.1.1",
     "react": "^18.3.1",
+    "react-cytoscapejs": "^2.0.0",
     "react-dom": "^18.3.1",
     "react-dropzone": "^14.2.3",
     "react-force-graph-2d": "^1.29.0",
     "react-hot-toast": "^2.4.1",
-    "surrealdb.js": "^0.9.0",
     "zustand": "^4.5.5"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
+    "@types/cytoscape": "^3.21.9",
+    "@types/cytoscape-dagre": "^2.3.4",
     "@types/node": "^20.19.30",
     "@types/papaparse": "^5.3.14",
     "@types/pdf-parse": "^1.1.4",

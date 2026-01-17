@@ -1,12 +1,14 @@
 declare module "cytoscape-cola" {
-  import cytoscape from "cytoscape";
-  const cola: cytoscape.Ext;
+  const cola: any;
   export = cola;
 }
 
 declare module "cytoscape-dagre" {
-  import cytoscape from "cytoscape";
-  const dagre: cytoscape.Ext;
+  const dagre: any;
   export = dagre;
 }
 
+declare module "cytoscape-fcose" {
+  const fcose: any;
+  export = fcose;
+}
