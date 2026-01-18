@@ -72,7 +72,7 @@ export default function NodeDetailPanel({
                </span>
              </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full text-[#94A3B8] transition-colors"><X className="w-5 h-5" /></button>
+          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-[#94A3B8] transition-colors"><X className="w-5 h-5" /></button>
         </div>
       </div>
 
@@ -98,7 +98,7 @@ export default function NodeDetailPanel({
         <div>
            <div className="flex items-center justify-between mb-4">
             <h3 className="text-xs font-bold text-[#64748B] uppercase tracking-wider">Relationships ({nodeRelationships.length})</h3>
-            <button onClick={() => onCreateRelationship(selectedEntity.id)} className="px-3 py-1.5 bg-[#2563EB] hover:bg-blue-600 text-white text-xs font-bold rounded flex items-center gap-1"><Plus className="w-3 h-3" /> Add</button>
+            <button onClick={() => onCreateRelationship(selectedEntity.id)} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded flex items-center gap-1"><Plus className="w-3 h-3" /> Add</button>
           </div>
           
           <div className="space-y-3">
@@ -109,9 +109,9 @@ export default function NodeDetailPanel({
                     const otherName = getNodeLabel(otherId);
 
                     return (
-                    <div key={rel.id} className="relative group bg-[#020617] border border-[#334155] rounded-lg p-3 hover:border-[#3B82F6] transition-all">
+                    <div key={rel.id} className="relative group bg-[#020617] border border-[#334155] rounded-lg p-3 hover:border-blue-500 transition-all">
                         <div className="mb-2">
-                            <span className="inline-block px-2 py-0.5 bg-[#1E3A8A] text-[#60A5FA] text-[10px] font-bold uppercase rounded border border-[#1E40AF]">{rel.type}</span>
+                            <span className="inline-block px-2 py-0.5 bg-blue-900/50 text-blue-400 text-[10px] font-bold uppercase rounded border border-blue-800">{rel.type}</span>
                         </div>
                         <div className="flex items-center gap-3">
                             <div className={`flex items-center gap-1 text-[10px] font-bold uppercase ${isSource ? 'text-green-400' : 'text-orange-400'}`}>
@@ -121,8 +121,8 @@ export default function NodeDetailPanel({
                             <span className="text-sm font-semibold text-white truncate flex-1" title={otherId}>{otherName}</span>
                         </div>
                         <div className="absolute top-2 right-2 flex opacity-0 group-hover:opacity-100 transition-opacity bg-[#0F172A] rounded border border-[#334155]">
-                            <button onClick={() => onEditRelationship(rel.id)} className="p-1.5 hover:bg-[#1E293B] text-[#94A3B8] hover:text-[#2563EB]"><Edit2 className="w-3 h-3" /></button>
-                            <button onClick={() => onDeleteRelationship(rel.id)} className="p-1.5 hover:bg-[#1E293B] text-[#94A3B8] hover:text-red-400"><Trash2 className="w-3 h-3" /></button>
+                            <button onClick={() => onEditRelationship(rel.id)} className="p-1.5 hover:bg-slate-700 text-gray-400 hover:text-blue-400"><Edit2 className="w-3 h-3" /></button>
+                            <button onClick={() => onDeleteRelationship(rel.id)} className="p-1.5 hover:bg-slate-700 text-gray-400 hover:text-red-400"><Trash2 className="w-3 h-3" /></button>
                         </div>
                     </div>
                     );

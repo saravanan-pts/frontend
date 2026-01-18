@@ -76,13 +76,13 @@ export default function AlertDialog({
   const getIcon = () => {
     switch (type) {
       case "success":
-        return <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />;
+        return <CheckCircle className="w-5 h-5 text-green-400 flex-shrink-0" />;
       case "error":
-        return <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />;
+        return <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />;
       case "warning":
-        return <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0" />;
+        return <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0" />;
       default:
-        return <Info className="w-5 h-5 text-blue-600 flex-shrink-0" />;
+        return <Info className="w-5 h-5 text-blue-400 flex-shrink-0" />;
     }
   };
 
@@ -100,35 +100,35 @@ export default function AlertDialog({
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
       <div
         ref={dialogRef}
-        className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4"
+        className="bg-[#1E293B] rounded-lg shadow-xl w-full max-w-md mx-4 border border-[#334155]"
       >
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
+        <div className="px-6 py-4 border-b border-[#334155] flex items-center gap-3">
           {getIcon()}
-          <h2 className="text-xl font-semibold flex-1">{title}</h2>
+          <h2 className="text-xl font-semibold text-white flex-1">{title}</h2>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-gray-100 rounded"
+            className="p-1 hover:bg-slate-700 rounded-full"
             aria-label="Close"
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
         {/* Message */}
         <div className="px-6 py-4">
-          <p className="text-gray-700">{message}</p>
+          <p className="text-gray-300">{message}</p>
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-end">
+        <div className="px-6 py-4 border-t border-[#334155] flex items-center justify-end">
           <button
             ref={okButtonRef}
             onClick={onClose}
-            className={`px-4 py-2 text-white rounded ${getButtonColor()}`}
+            className={`px-4 py-2 text-white font-semibold rounded ${getButtonColor()}`}
           >
             OK
           </button>

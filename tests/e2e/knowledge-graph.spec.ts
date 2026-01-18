@@ -88,8 +88,38 @@ test.describe('Knowledge Graph POC - E2E Tests', () => {
     expect(hasSpinner || hasLoadingText || hasCanvas).toBeTruthy();
   });
 
-  test('should show error boundary on errors', async ({ page }) => {
-    const appContent = page.locator('body');
-    await expect(appContent).toBeVisible();
+  test('should filter graph by document', async ({ page }) => {
+    // 1. Go to upload tab
+    await page.getByRole('button', { name: /Upload/i }).click();
+
+    // 2. Upload test file
+    const fileChooserPromise = page.waitForEvent('filechooser');
+    await page.getByText(/Drag and drop/i).click();
+    const fileChooser = await fileChooserPromise;
+    await fileChooser.setFiles(join(__dirname, 'test-data', 'test-doc.txt'));
+
+    // 3. Wait for processing to complete
+    await expect(page.locator('text=File processed successfully')).toBeVisible({ timeout: 20000 });
+
+    // 4. Find and select the document in the dropdown
+    const docFilter = page.locator('select');
+    await docFilter.selectOption({ label: /test-doc.txt/ });
+    
+    // Give time for graph to re-render
+    await page.waitForTimeout(2000); 
+
+    // 5. Assert that the graph now shows only the nodes from that document
+    // Note: The exact count may vary based on the AI model's output.
+    // Expecting Person A, Person B, and the Document node itself.
+    const entityCountTextFiltered = await page.locator('div.text-sm.text-\\[\\#94A3B8\\]').innerText();
+    expect(entityCountTextFiltered).toMatch(/Viewing 3 of 3/);
+
+    // 6. Go back to "All"
+    await docFilter.selectOption({ label: /Load All/ });
+    await page.waitForTimeout(2000);
+
+    // 7. Assert that the graph now shows more nodes
+    const entityCountTextAll = await page.locator('div.text-sm.text-\\[\\#94A3B8\\]').innerText();
+    expect(parseInt(entityCountTextAll.split(' ')[1])).toBeGreaterThan(3);
   });
 });

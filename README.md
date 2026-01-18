@@ -11,6 +11,7 @@ An interactive knowledge graph visualization application built with Next.js, Cyt
 - **Real-time Updates**: Live graph updates as new data is processed
 - **Entity Management**: Create, edit, delete entities and relationships
 - **Search & Filter**: Search entities and filter graph by entity types
+- **Filter by Document**: Isolate and view the subgraph for a specific uploaded document.
 - **Export/Import**: Export graph data as JSON or PNG, import existing graphs
 
 ## Architecture
@@ -119,6 +120,7 @@ An interactive knowledge graph visualization application built with Next.js, Cyt
 - **Pan**: Click and drag the background
 - **Select Node**: Click on a node to view details
 - **Filter**: Use the filter button to show/hide entity types
+- **Filter by Document**: Use the dropdown menu at the top to select a specific document and view its graph in isolation.
 - **Search**: Use the search bar to find entities
 
 ### Managing Entities

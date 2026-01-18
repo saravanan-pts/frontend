@@ -19,7 +19,7 @@ import { useGraph } from "@/hooks/useGraph";
 import { Upload, FileText, Info, Settings, RefreshCw, Trash2 } from "lucide-react";
 import type { Entity, Relationship } from "@/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_URL } from "@/lib/constants";
 
 const getId = (item: any): string => {
   if (!item) return "";
@@ -104,7 +104,8 @@ export default function Home() {
   // Reload when document selection changes
   useEffect(() => { 
       if (!isInitialLoad) {
-          loadGraph(selectedDocumentId).catch(console.error); 
+          const filters = selectedDocumentId ? { document_id: selectedDocumentId } : null;
+          loadGraph(filters).catch(console.error); 
       }
   }, [selectedDocumentId, loadGraph, isInitialLoad]);
 
@@ -306,7 +307,8 @@ export default function Home() {
   const handleForceRefresh = () => { 
       if (graphRef.current) graphRef.current.fit(); 
       fetchDocuments(); 
-      loadGraph(selectedDocumentId); 
+      const filters = selectedDocumentId ? { document_id: selectedDocumentId } : null;
+      loadGraph(filters); 
   };
   
   const toggleEntityFilter = (type: string) => setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);

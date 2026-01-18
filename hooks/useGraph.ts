@@ -5,7 +5,7 @@ import { useGraphStore } from "@/lib/store";
 import { toast } from "react-hot-toast";
 import type { Entity, Relationship } from "@/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_URL } from "@/lib/constants";
 
 export function useGraph() {
   const {
@@ -64,13 +64,13 @@ export function useGraph() {
   };
 
   // --- 1. LOAD GRAPH (API) ---
-  const loadGraph = useCallback(async (documentId?: string | null) => {
+  const loadGraph = useCallback(async (filters?: object | null) => {
     setLoading(true); setIsLoading(true);
     try {
       const res = await fetch(`${API_URL}/api/graph/fetch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filters: documentId ? { document_id: documentId } : {} }),
+        body: JSON.stringify({ filters: filters || {} }),
       });
       
       if (!res.ok) throw new Error("Failed to fetch graph");

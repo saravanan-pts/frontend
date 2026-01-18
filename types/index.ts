@@ -22,6 +22,7 @@ export interface Entity {
   type: EntityType;
   label: string;
   properties: Record<string, any>;
+  documentId?: string;
   metadata?: {
     source?: string;
     confidence?: number;
@@ -37,6 +38,7 @@ export interface Relationship {
   to: string; // Entity ID
   type: RelationshipType;
   properties?: Record<string, any>;
+  documentId?: string;
   confidence?: number;
   source?: string;
   createdAt?: string;

@@ -1,0 +1,59 @@
+name: Build and Deploy UI
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ACR_REGISTRY: "irmaiuatregistry.azurecr.io"
+  APP_NAME: "irmai-kg-v2-cosmosdb-ui"
+  ORCHESTRATOR_URL: "https://b5cefeed5009.ngrok-free.app"
+  RESOURCE_GROUP: "rg-irmai-uat-us-1"
+  K8S_CLUSTER: "rg-irmai-uat-us-1-cluster"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name irmaiuatregistry
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          docker build -t $ACR_REGISTRY/$APP_NAME:$IMAGE_TAG -t $ACR_REGISTRY/$APP_NAME:latest .
+          docker push $ACR_REGISTRY/$APP_NAME:$IMAGE_TAG
+          docker push $ACR_REGISTRY/$APP_NAME:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Orchestrator Webhook
+        run: |
+          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhooks/gitlab-deploy" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "project_name": "irmai-kg-v2-cosmosdb-ui",
+            "image": "${{ env.ACR_REGISTRY }}/${{ env.APP_NAME }}:${{ github.sha }}",
+            "cluster_name": "${{ env.K8S_CLUSTER }}",
+            "namespace": "default",
+            "resource_group": "${{ env.RESOURCE_GROUP }}",
+            "branch": "main",
+            "commit_sha": "${{ github.sha }}"
+          }'

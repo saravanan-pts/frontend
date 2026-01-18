@@ -192,15 +192,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         cy.batch(() => {
             cy.elements().remove(); 
 
-            let visibleEntities = entities;
-            if(selectedDocumentId) {
-                visibleEntities = entities.filter(e => 
-                    (e as any).documentId === selectedDocumentId || 
-                    (e as any).filename === selectedDocumentId
-                );
-            }
-
-            const nodes = visibleEntities.map(e => ({
+            const nodes = entities.map(e => ({
                 group: "nodes",
                 data: { 
                     id: String(e.id), 
@@ -241,7 +233,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             padding: 40
         } as any).run();
 
-    }, [entities, relationships, selectedDocumentId]);
+    }, [entities, relationships]);
 
     // 3. EXPOSE API
     useImperativeHandle(ref, () => ({
