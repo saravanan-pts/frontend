@@ -58,45 +58,45 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         style: [
              // --- NODE STYLING (UNIFORM PILLS) ---
              {
-                selector: "node",
-                style: {
-                  "background-color": (ele: any) => getEntityColor(ele.data("normType")),
-                  "label": "data(label)",
-                  "shape": "round-rectangle",
-                  "width": "160px",   
-                  "height": "50px", 
-                  "text-valign": "center", 
-                  "text-halign": "center",
-                  "text-wrap": "wrap",
-                  "text-max-width": "140px", 
-                  "font-size": "11px",       
-                  "font-weight": "bold",    
-                  "color": "#ffffff",
-                  "text-outline-width": 2,  
-                  "text-outline-color": "#1e293b", 
-                  "z-index": 10 // Nodes always on top
-                },
+               selector: "node",
+               style: {
+                 "background-color": (ele: any) => getEntityColor(ele.data("normType")),
+                 "label": "data(label)",
+                 "shape": "round-rectangle",
+                 "width": "160px",   
+                 "height": "50px", 
+                 "text-valign": "center", 
+                 "text-halign": "center",
+                 "text-wrap": "wrap",
+                 "text-max-width": "140px", 
+                 "font-size": "11px",        
+                 "font-weight": "bold",     
+                 "color": "#ffffff",
+                 "text-outline-width": 2,  
+                 "text-outline-color": "#1e293b", 
+                 "z-index": 10 // Nodes always on top
+               },
              },
              // --- EDGE STYLING (FIXED VISIBILITY) ---
              {
-                selector: "edge",
-                style: {
-                  "width": 3, // Thicker for better visibility
-                  "line-color": "#cbd5e1", // Brighter Slate (was #94a3b8)
-                  "target-arrow-color": "#cbd5e1",
-                  "target-arrow-shape": "triangle", 
-                  "curve-style": "bezier",
-                  "label": "data(type)", 
-                  "font-size": "10px",
-                  "font-weight": "bold",
-                  "text-rotation": "autorotate",
-                  "text-background-opacity": 1,
-                  "text-background-color": "#020617", // Matches main BG so line doesn't cut through text
-                  "text-background-padding": "4px",
-                  "text-background-shape": "roundrectangle",
-                  "color": "#94a3b8", // Text color
-                  "z-index": 1 // Edges strictly below nodes
-                }
+               selector: "edge",
+               style: {
+                 "width": 3, // Thicker for better visibility
+                 "line-color": "#cbd5e1", // Brighter Slate (was #94a3b8)
+                 "target-arrow-color": "#cbd5e1",
+                 "target-arrow-shape": "triangle", 
+                 "curve-style": "bezier",
+                 "label": "data(type)", 
+                 "font-size": "10px",
+                 "font-weight": "bold",
+                 "text-rotation": "autorotate",
+                 "text-background-opacity": 1,
+                 "text-background-color": "#020617", // Matches main BG so line doesn't cut through text
+                 "text-background-padding": "4px",
+                 "text-background-shape": "roundrectangle",
+                 "color": "#94a3b8", // Text color
+                 "z-index": 1 // Edges strictly below nodes
+               }
              },
              // --- HIGHLIGHT STYLES ---
              { 
@@ -108,7 +108,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                style: { 
                  "border-width": 4, 
                  "border-color": "#FBBF24", // Yellow glow
-                 "width": "170px",          
+                 "width": "170px",           
                  "height": "60px",
                  "font-size": "12px",
                  "z-index": 20 // Highlighted nodes float highest

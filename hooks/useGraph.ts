@@ -92,6 +92,31 @@ export function useGraph() {
     }
   }, [setEntities, setRelationships, setLoading]);
 
+  // --- NEW: CLEAR GRAPH FUNCTION ---
+  const clearGraph = useCallback(async () => {
+    setLoading(true);
+    try {
+        // Explicitly sending scope to match backend expectation
+        const res = await fetch(`${API_URL}/clear`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: "all" }),
+        });
+        
+        if (res.ok) {
+            toast.success("Graph cleared successfully");
+            await loadGraph(null); // Reload empty state
+        } else {
+            throw new Error("Clear failed");
+        }
+    } catch (error) {
+        console.error(error);
+        toast.error("Failed to clear graph");
+    } finally {
+        setLoading(false);
+    }
+  }, [loadGraph, setLoading]);
+
   // --- 2. SEARCH (API) ---
   const searchGraph = useCallback(async (query: string) => {
     try {
@@ -190,6 +215,7 @@ export function useGraph() {
     loadGraph, 
     searchGraph, 
     analyzeGraph,
+    clearGraph, // Exported this
     
     // CRUD
     createEntity: createEntityApi, 
