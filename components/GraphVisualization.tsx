@@ -56,11 +56,15 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         maxZoom: 2.5,
         minZoom: 0.1,
         style: [
-             // --- NODE STYLING (UNIFORM PILLS) ---
+             // --- NODE STYLING ---
              {
                selector: "node",
                style: {
-                 "background-color": (ele: any) => getEntityColor(ele.data("normType")),
+                 "background-color": (ele: any) => {
+                    // Pass full data to util to catch editable 'normType'
+                    const normType = normalizeType(ele.data());
+                    return getEntityColor(normType);
+                 },
                  "label": "data(label)",
                  "shape": "round-rectangle",
                  "width": "160px",   
@@ -74,15 +78,15 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                  "color": "#ffffff",
                  "text-outline-width": 2,  
                  "text-outline-color": "#1e293b", 
-                 "z-index": 10 // Nodes always on top
+                 "z-index": 10
                },
              },
-             // --- EDGE STYLING (FIXED VISIBILITY) ---
+             // --- EDGE STYLING ---
              {
                selector: "edge",
                style: {
-                 "width": 3, // Thicker for better visibility
-                 "line-color": "#cbd5e1", // Brighter Slate (was #94a3b8)
+                 "width": 3, 
+                 "line-color": "#cbd5e1", 
                  "target-arrow-color": "#cbd5e1",
                  "target-arrow-shape": "triangle", 
                  "curve-style": "bezier",
@@ -91,27 +95,33 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                  "font-weight": "bold",
                  "text-rotation": "autorotate",
                  "text-background-opacity": 1,
-                 "text-background-color": "#020617", // Matches main BG so line doesn't cut through text
+                 "text-background-color": "#020617", 
                  "text-background-padding": "4px",
                  "text-background-shape": "roundrectangle",
-                 "color": "#94a3b8", // Text color
-                 "z-index": 1 // Edges strictly below nodes
+                 "color": "#94a3b8",
+                 "z-index": 1
                }
              },
-             // --- HIGHLIGHT STYLES ---
+             // --- INTERACTION STATES ---
              { 
                selector: ".hidden", 
-               style: { "opacity": 0.1 } 
+               style: { 
+                   "display": "none" // Completely hides filtered items
+               } 
+             },
+             { 
+               selector: ".faded", 
+               style: { 
+                   "opacity": 0.1,  // Faint for non-focused items
+                   "z-index": 0 
+               } 
              },
              { 
                selector: ".highlighted", 
                style: { 
                  "border-width": 4, 
-                 "border-color": "#FBBF24", // Yellow glow
-                 "width": "170px",           
-                 "height": "60px",
-                 "font-size": "12px",
-                 "z-index": 20 // Highlighted nodes float highest
+                 "border-color": "#FBBF24", // Gold Border
+                 "z-index": 999             // Bring to front
                } 
              },
              {
@@ -120,14 +130,15 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                  "width": 4,
                  "line-color": "#FBBF24",
                  "target-arrow-color": "#FBBF24",
-                 "z-index": 5
+                 "opacity": 1,
+                 "z-index": 998
                }
              },
              {
                selector: ":selected",
                style: {
                  "border-width": 4,
-                 "border-color": "#3b82f6", 
+                 "border-color": "#3b82f6", // Blue border for selection
                }
              }
         ],
@@ -142,14 +153,16 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
           onNodeSelect(node.id());
           
           cy.batch(() => {
-              cy.elements().removeClass("highlighted").addClass("hidden");
-              const neighborhood = node.neighborhood().add(node);
-              neighborhood.removeClass("hidden").addClass("highlighted");
+              cy.elements().removeClass("highlighted").removeClass("faded");
+              const neighborhood = node.closedNeighborhood();
+              const others = cy.elements().not(neighborhood);
+              others.addClass("faded");
+              neighborhood.addClass("highlighted");
           });
 
           cy.animate({
               fit: {
-                  eles: node.neighborhood().add(node),
+                  eles: node.closedNeighborhood(),
                   padding: 80
               },
               duration: 700, 
@@ -157,10 +170,13 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
           } as any);
       });
 
+      // --- CLICK BACKGROUND TO RESET ---
       cy.on("tap", (evt) => { 
           if (evt.target === cy) { 
               onNodeDeselect(); 
-              cy.elements().removeClass("hidden").removeClass("highlighted");
+              cy.batch(() => {
+                  cy.elements().removeClass("faded").removeClass("highlighted");
+              });
           } 
       });
 
@@ -181,7 +197,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         const currentRelIds = relationships.map(r => r.id).sort().join(",");
 
         if (currentEntityIds === prevEntitiesIds.current && currentRelIds === prevRelIds.current) {
-            return; 
+            return;
         }
 
         prevEntitiesIds.current = currentEntityIds;
@@ -198,7 +214,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                     id: String(e.id), 
                     label: e.label || e.id, 
                     type: e.type, 
-                    normType: normalizeType(e.type, e.label),
+                    normType: e.properties?.normType, 
                     ...e.properties 
                 }
             }));
@@ -225,7 +241,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             randomize: true, 
             animate: true, 
             animationDuration: 800,
-            nodeRepulsion: 18000, // Increased to give lines more space
+            nodeRepulsion: 18000, 
             idealEdgeLength: 180,   
             nodeSeparation: 120,    
             gravity: 0.25,
@@ -235,43 +251,60 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
 
     }, [entities, relationships]);
 
-    // 3. EXPOSE API
+    // 3. EXPOSE API (FILTER LOGIC REFINED)
     useImperativeHandle(ref, () => ({
       filterByType: (visibleTypes) => {
         if (!cyRef.current) return;
         cyRef.current.batch(() => {
             cyRef.current?.nodes().removeClass("hidden");
-            if (visibleTypes.length > 0) {
-              cyRef.current?.nodes().filter(n => !visibleTypes.includes(n.data('normType'))).addClass("hidden");
+            
+            // If the filter list is NOT empty, we hide things that are NOT in the list.
+            if (visibleTypes && visibleTypes.length > 0) {
+              const lowerVisible = visibleTypes.map(t => t.toLowerCase());
+              
+              cyRef.current?.nodes().filter(n => {
+                  // Normalize node type using util, then lowercase
+                  const nType = normalizeType(n.data()).toLowerCase();
+                  // Hide if NOT in the visible list
+                  return !lowerVisible.includes(nType);
+              }).addClass("hidden");
             }
         });
       },
+      
       filterByRelationship: (visibleTypes) => {
          if (!cyRef.current) return;
          cyRef.current.batch(() => {
             cyRef.current?.edges().removeClass("hidden");
-            if (visibleTypes.length > 0) {
-              cyRef.current?.edges().filter(e => !visibleTypes.includes(e.data('type'))).addClass("hidden");
+            
+            if (visibleTypes && visibleTypes.length > 0) {
+              const lowerVisible = visibleTypes.map(t => t.toLowerCase());
+
+              cyRef.current?.edges().filter(e => {
+                  const eType = String(e.data('type') || "").toLowerCase();
+                  return !lowerVisible.includes(eType);
+              }).addClass("hidden");
             }
          });
       },
+      
       searchAndHighlight: (query) => {
         if (!cyRef.current) return;
         const cy = cyRef.current;
         const term = query.toLowerCase();
         cy.batch(() => {
-            cy.elements().removeClass("hidden highlighted");
+            cy.elements().removeClass("hidden faded highlighted");
             if (!term) return;
             const matches = cy.nodes().filter(n => n.data('label').toLowerCase().includes(term));
             const neighborhood = matches.neighborhood().add(matches);
-            cy.elements().not(neighborhood).addClass("hidden");
+            cy.elements().not(neighborhood).addClass("faded"); 
             matches.addClass("highlighted");
             cy.animate({ fit: { eles: neighborhood, padding: 50 }, duration: 600 } as any);
         });
       },
       fit: () => cyRef.current?.fit(),
       resetZoom: () => { 
-          cyRef.current?.elements().removeClass("hidden highlighted"); 
+          cyRef.current?.elements().removeClass("hidden faded highlighted"); 
           cyRef.current?.fit(); 
       },
       zoomIn: () => cyRef.current?.zoom((cyRef.current.zoom() || 1) * 1.2),
