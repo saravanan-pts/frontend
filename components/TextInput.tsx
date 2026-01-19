@@ -12,7 +12,7 @@ export default function TextInput() {
     entities: ExtractedEntity[];
     relationships: ExtractedRelationship[];
   } | null>(null);
-  const { processText, isProcessing } = useFileProcessor();
+  const { processFile, isProcessing } = useFileProcessor();
 
   const handleProcess = async () => {
     if (!text.trim()) {
@@ -21,7 +21,10 @@ export default function TextInput() {
     }
 
     try {
-      const result = await processText(text, "manual-input.txt");
+      // Create a File object in memory
+      const file = new File([text], "manual-input.txt", { type: "text/plain" });
+      
+      const result = await processFile(file);
       setExtractedData({
         entities: result.entities,
         relationships: result.relationships,
