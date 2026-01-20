@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: irmai-kg-v2-cosmosdb-ui
+  labels:
+    app: irmai-kg-v2-cosmosdb-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: irmai-kg-v2-cosmosdb-ui
+  template:
+    metadata:
+      labels:
+        app: irmai-kg-v2-cosmosdb-ui
+    spec:
+      containers:
+      - name: frontend
+        image: irmaiuatregistry.azurecr.io/irmai-kg-v2-cosmosdb-ui:latest
+        ports:
+        - containerPort: 3000  # Matches EXPOSE in Dockerfile
+        env:
+        - name: NEXT_PUBLIC_API_URL
+          value: "https://api-kg.irmai.io" # Points to your live backend
+      imagePullSecrets:
+      - name: acr-secret # Uses the secret you found in the cluster
