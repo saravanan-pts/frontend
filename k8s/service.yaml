@@ -8,5 +8,5 @@ spec:
     app: irmai-kg-v2-cosmosdb-ui
   ports:
     - protocol: TCP
-      port: 80         # Port for your browser (http://<IP>)
-      targetPort: 3000 # Matches the containerPort above
+      port: 80
+      targetPort: 3000
