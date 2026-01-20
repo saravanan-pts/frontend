@@ -44,16 +44,39 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Orchestrator Webhook
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Login to Azure (Required for OIDC authentication)
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # 2. Login to ACR (Required to allow the runner to inspect image manifests)
+      - name: Login to ACR
         run: |
-          curl -X POST "${{ env.ORCHESTRATOR_URL }}/webhooks/gitlab-deploy" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "project_name": "irmai-kg-v2-cosmosdb-ui",
-            "image": "${{ env.ACR_REGISTRY }}/${{ env.APP_NAME }}:${{ github.sha }}",
-            "cluster_name": "${{ env.K8S_CLUSTER }}",
-            "namespace": "default",
-            "resource_group": "${{ env.RESOURCE_GROUP }}",
-            "branch": "main",
-            "commit_sha": "${{ github.sha }}"
-          }'
+          az acr login --name irmaiuatregistry
+
+      # 3. Set AKS Context (Required for k8s-deploy to find your cluster)
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.K8S_CLUSTER }}
+
+      # 4. Deploy to Kubernetes
+      - name: Deploy to Kubernetes
+        uses: azure/k8s-deploy@v5
+        with:
+          action: deploy
+          manifests: |
+            k8s/deployment.yaml
+            k8s/service.yaml
+          images: |
+            ${{ env.ACR_REGISTRY }}/${{ env.APP_NAME }}:${{ github.sha }}
+          # Uses the secret you confirmed exists in the cluster
+          imagepullsecrets: |
+            acr-secret
