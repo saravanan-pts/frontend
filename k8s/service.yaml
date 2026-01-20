@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: irmai-kg-v2-cosmosdb-ui-svc
+spec:
+  type: LoadBalancer
+  selector:
+    app: irmai-kg-v2-cosmosdb-ui
+  ports:
+    - protocol: TCP
+      port: 80         # Port for your browser (http://<IP>)
+      targetPort: 3000 # Matches the containerPort above
