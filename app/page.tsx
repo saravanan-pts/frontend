@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { Toaster, toast } from "react-hot-toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import GraphVisualization, { type GraphVisualizationRef } from "@/components/GraphVisualization";
@@ -29,7 +30,8 @@ const getId = (item: any): string => {
 
 export default function Home() {
   const graphRef = useRef<GraphVisualizationRef>(null);
-  
+  const searchParams = useSearchParams();
+
   // 1. GET RAW DATA FROM STORE
   const { activeTab, setActiveTab, setSelectedEntity, selectedEntity, entities, relationships } = useGraphStore();
   
@@ -40,7 +42,12 @@ export default function Home() {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<any[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true);
+  
+  // Integration State
+  const embedMode = searchParams.get("mode") === "embed";
+
+  // FIX: Auto-close filter panel if in embed mode to save space
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(!embedMode);
   
   // View State
   const [viewEntities, setViewEntities] = useState<Entity[]>([]);
@@ -61,63 +68,131 @@ export default function Home() {
   const [selectedEntityFilters, setSelectedEntityFilters] = useState<string[]>([]);
   const [selectedRelFilters, setSelectedRelFilters] = useState<string[]>([]);
 
-  // --- FIX: CONVERT MAP TO ARRAY ---
+  // FIX: CONVERT MAP TO ARRAY
   const stableEntities = useMemo(() => {
-      // If store uses Map, convert to Array
-      if (entities instanceof Map) {
-          return Array.from(entities.values());
-      }
-      // If store uses Array, return as is
-      if (Array.isArray(entities)) {
-          return entities;
-      }
+      if (entities instanceof Map) return Array.from(entities.values());
+      if (Array.isArray(entities)) return entities;
       return [];
   }, [entities]);
 
   const stableRelationships = useMemo(() => relationships || [], [relationships]);
 
-  // --- 1. FETCH DOCUMENTS & INIT ---
+  // 1. FETCH DOCUMENTS & INIT
   const fetchDocuments = useCallback(async () => {
     try { 
       const res = await fetch(`${API_URL}/api/documents`); 
       if (res.ok) { 
         const data = await res.json();
         setDocuments(data.files || data || []); 
+        return data.files || data || [];
       } 
     } catch (e) { 
       console.error(e); 
       setDocuments([]); 
+      return [];
     }
   }, []);
 
+  // INTEGRATION: AUTO-SELECT FROM GENUI
   useEffect(() => {
-    const init = async () => { 
-        try { 
-            await fetchDocuments(); 
-            await loadGraph(null); 
-        } catch (e) { console.error(e); } 
-        finally { setIsInitialLoad(false); } 
+    const initIntegration = async () => {
+        // Fetch available files first
+        const docs = await fetchDocuments();
+        
+        // Check URL Params (from GenUI)
+        const globalDomain = searchParams.get("domain");
+        const globalDocId = searchParams.get("docId");
+
+        if (globalDocId) {
+            console.log(`GenUI Request: Looking for Domain=[${globalDomain}] Doc=[${globalDocId}]`);
+            
+            // Normalize Helper: Lowercase, remove spaces, dashes, underscores
+            // FIX: Allow string OR null as input
+            const normalize = (str: string | null) => str ? str.toLowerCase().replace(/[\s\-_]/g, '') : "";
+
+            const targetDomainNorm = normalize(globalDomain);
+            const targetDocNorm = normalize(globalDocId);
+
+            // STRICT MATCHING LOGIC
+            const match = docs.find((d: any) => {
+                const dbFilename = d.filename || d.documentId || "";
+                
+                // 1. Attempt to split DB filename by FIRST underscore to get "Domain" vs "Doc"
+                // Example: "Car-insurance_account_lifecycle_log.csv"
+                const parts = dbFilename.split('_');
+                
+                let dbDomainPart = "";
+                let dbDocPart = "";
+
+                if (parts.length > 1) {
+                    dbDomainPart = parts[0]; // "Car-insurance"
+                    // Join the rest back together to get the full doc name
+                    dbDocPart = parts.slice(1).join('_'); // "account_lifecycle_log.csv"
+                } else {
+                    // Fallback: Assume whole name is the doc, or domain is missing
+                    dbDocPart = dbFilename;
+                }
+
+                // Clean up the extracted parts
+                const dbDomainNorm = normalize(dbDomainPart);
+                const dbDocNorm = normalize(dbDocPart.replace('.csv', '').replace('.txt', ''));
+                
+                // Also check explicit domain field if it exists in DB
+                const explicitDbDomainNorm = d.domain ? normalize(d.domain) : "";
+
+                // CHECK 1: DOMAIN MATCH
+                // If GenUI sent a domain, the DB file's domain part MUST match
+                let domainMatches = false;
+                if (targetDomainNorm) {
+                    if (dbDomainNorm.includes(targetDomainNorm) || targetDomainNorm.includes(dbDomainNorm)) domainMatches = true;
+                    if (explicitDbDomainNorm && explicitDbDomainNorm.includes(targetDomainNorm)) domainMatches = true;
+                    
+                    if (!domainMatches) return false; // Domain mismatch, skip this file
+                }
+
+                // CHECK 2: DOCUMENT MATCH
+                // Does the filename/ID match the requested document?
+                if (dbDocNorm.includes(targetDocNorm) || targetDocNorm.includes(dbDocNorm)) {
+                    return true;
+                }
+                
+                return false;
+            });
+
+            if (match) {
+                console.log(`MATCH SUCCESS: Found '${match.filename || match.documentId}'`);
+                setSelectedDocumentId(match.id);
+            } else {
+                console.error(`MATCH FAILED. Could not find '${globalDocId}' in domain '${globalDomain}'.`);
+                // Optional: Don't show toast error immediately to avoid spamming if it's just loading
+            }
+        } else {
+             // Initial load: Only load ALL if NOT embedded
+             if (isInitialLoad && !embedMode) await loadGraph(null);
+        }
+        
+        setIsInitialLoad(false);
     };
-    init();
-  }, [loadGraph, fetchDocuments]);
+
+    initIntegration();
+  }, [fetchDocuments, searchParams, loadGraph, embedMode]); 
   
   // Reload when document selection changes
   useEffect(() => { 
-      if (!isInitialLoad) {
-          const filters = selectedDocumentId ? { document_id: selectedDocumentId } : null;
+      if (!isInitialLoad && selectedDocumentId) {
+          const filters = { document_id: selectedDocumentId };
           loadGraph(filters).catch(console.error); 
       }
   }, [selectedDocumentId, loadGraph, isInitialLoad]);
 
-  // --- 2. PREPARE VIEW DATA ---
+  // 2. PREPARE VIEW DATA
   useEffect(() => {
     if (stableEntities.length === 0) {
       setViewEntities([]); setViewRelationships([]);
       return;
     }
     const timer = setTimeout(() => {
-        // Safe slicing since stableEntities is now guaranteed to be an Array
-        const nodesToShow = stableEntities.slice(0, 500); 
+        const nodesToShow = stableEntities.slice(0, 500);
         
         if (selectedEntity && !nodesToShow.find(n => getId(n) === getId(selectedEntity))) {
             nodesToShow.push(selectedEntity);
@@ -134,32 +209,22 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [stableEntities, stableRelationships, selectedEntity]);
 
-  // --- 3. FILTER LOGIC (Aggressive Deduplication) ---
+  // 3. FILTER LOGIC
   useEffect(() => {
     if (stableEntities.length > 0) {
-      // 1. Get all raw types
       const rawTypes = stableEntities.map(e => e.type || "Concept");
-      
-      // 2. Create a Set to remove duplicates
       const typeSet = new Set<string>();
       
       rawTypes.forEach(t => {
-          // Force string, trim whitespace, and normalize case
           const clean = String(t).trim(); 
           if (clean) {
-              // Capitalize first letter (e.g. "activity" -> "Activity")
               const formatted = clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
               typeSet.add(formatted);
           }
       });
 
-      // 3. Convert Set back to Array and Sort
       const uniqueTypes = Array.from(typeSet).sort();
-      
-      // Update state only if changed to prevent loops
       setAllEntityTypes(prev => JSON.stringify(prev) === JSON.stringify(uniqueTypes) ? prev : uniqueTypes);
-      
-      // Default: Select all types if none selected
       setSelectedEntityFilters(prev => prev.length === 0 ? uniqueTypes : prev);
     }
 
@@ -170,7 +235,6 @@ export default function Home() {
     }
   }, [stableEntities, stableRelationships]);
   
-  // Apply Filters to Graph
   useEffect(() => { 
       if (graphRef.current) { 
           graphRef.current.filterByType(selectedEntityFilters); 
@@ -178,7 +242,7 @@ export default function Home() {
       } 
   }, [selectedEntityFilters, selectedRelFilters]);
 
-  // --- 4. HANDLERS ---
+  // 4. HANDLERS
   const handleSearch = async (query: string) => {
     const term = query.toLowerCase().trim();
     if (!term) { 
@@ -187,7 +251,6 @@ export default function Home() {
         return; 
     }
     
-    // 1. Local Search First
     const match = stableEntities.find(e => (e.label || "").toLowerCase().includes(term));
     if (match) {
       toast.success(`Found: ${match.label}`); 
@@ -196,7 +259,6 @@ export default function Home() {
       return;
     }
 
-    // 2. Backend Search Fallback
     const result = await searchGraph(term);
     if (result && result.results && result.results.length > 0) {
        toast.success(`Found ${result.results.length} matches`);
@@ -208,14 +270,15 @@ export default function Home() {
   const handleDeleteFile = async () => {
     if (!selectedDocumentId) return; 
     const doc = documents.find(d => d.id === selectedDocumentId); 
-    if (!doc || !confirm(`Delete "${doc.filename}"?`)) return;
+    if (!doc || !confirm(`Delete "${doc.filename || doc.documentId}"?`)) return;
     
     setIsDeleting(true); 
     try { 
         const response = await fetch(`${API_URL}/api/documents`, { 
             method: 'DELETE', 
             headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ filename: doc.filename }), 
+            // Send both ID and Filename to ensure backend finds it
+            body: JSON.stringify({ id: doc.id, filename: doc.filename, documentId: doc.documentId }), 
         });
         if (response.ok) { 
             toast.success("File deleted"); 
@@ -227,27 +290,20 @@ export default function Home() {
     finally { setIsDeleting(false); }
   };
 
-  // CRUD Handlers
   const handleEntitySubmit = async (data: any) => { 
       try { 
           if (editingEntity) await updateEntity(editingEntity.id, data); 
           else await createEntity(data); 
-          
-          setShowEntityForm(false); 
-          setEditingEntity(null); 
+          setShowEntityForm(false); setEditingEntity(null); 
           toast.success("Entity saved"); 
       } catch (e) { toast.error("Failed"); } 
   };
   
   const handleRelationshipSubmit = async (from: string, to: string, type: string, props?: any) => { 
       try { 
-          if (editingRelationship) {
-              toast.error("Edit edge not supported yet");
-          } else {
-              await createRelationship(from, to, type, props); 
-          }
-          setShowRelationshipForm(false); 
-          setEditingRelationship(null); 
+          if (editingRelationship) toast.error("Edit edge not supported yet");
+          else await createRelationship(from, to, type, props); 
+          setShowRelationshipForm(false); setEditingRelationship(null); 
           toast.success("Relationship saved"); 
       } catch (e) { toast.error("Failed"); } 
   };
@@ -258,57 +314,46 @@ export default function Home() {
   };
   
   const handleDeleteNode = async (id?: string) => { 
-      if (id && confirm("Delete node?")) { 
-          await deleteEntity(id); 
-          setContextMenu(null); 
-      } 
+      if (id && confirm("Delete node?")) { await deleteEntity(id); setContextMenu(null); } 
   };
   
   const handleEditRelationship = (id?: string) => { 
       const r = stableRelationships.find(x => getId(x) === id); 
-      if (r) { 
-          setEditingRelationship(r); 
-          setRelationshipFromId(r.from); 
-          setRelationshipToId(r.to); 
-          setShowRelationshipForm(true); 
-          setContextMenu(null); 
-      } 
+      if (r) { setEditingRelationship(r); setRelationshipFromId(r.from); setRelationshipToId(r.to); setShowRelationshipForm(true); setContextMenu(null); } 
   };
   
   const handleDeleteRelationship = async (id?: string) => { 
-      if (id && confirm("Delete relationship?")) { 
-          await deleteRelationship(id); 
-          setContextMenu(null); 
-      } 
+      if (id && confirm("Delete relationship?")) { await deleteRelationship(id); setContextMenu(null); } 
   };
   
   const handleCreateRelationship = (arg?: string | unknown) => { 
-      setEditingRelationship(null); 
-      setRelationshipFromId(typeof arg === 'string' ? arg : contextMenu?.nodeId || selectedEntity?.id); 
-      setRelationshipToId(undefined); 
-      setShowRelationshipForm(true); 
-      setContextMenu(null); 
+      setEditingRelationship(null); setRelationshipFromId(typeof arg === 'string' ? arg : contextMenu?.nodeId || selectedEntity?.id); 
+      setRelationshipToId(undefined); setShowRelationshipForm(true); setContextMenu(null); 
   };
   
-  const handleCreateNode = () => { 
-      setEditingEntity(null); 
-      setShowEntityForm(true); 
-      setContextMenu(null); 
-  };
+  const handleCreateNode = () => { setEditingEntity(null); setShowEntityForm(true); setContextMenu(null); };
   
   const handleAnalyze = async () => { 
       const t = toast.loading("Analyzing..."); 
-      try { 
-          await analyzeGraph('community_detection'); 
-          toast.success("Done!", { id: t }); 
-      } catch (e) { toast.error("Failed", { id: t }); } 
+      try { await analyzeGraph('community_detection'); toast.success("Done!", { id: t }); } 
+      catch (e) { toast.error("Failed", { id: t }); } 
   };
   
+  // FIX: REFRESH LOGIC
   const handleForceRefresh = () => { 
       if (graphRef.current) graphRef.current.fit(); 
       fetchDocuments(); 
-      const filters = selectedDocumentId ? { document_id: selectedDocumentId } : null;
-      loadGraph(filters); 
+      
+      // If a document is selected, refresh it.
+      if (selectedDocumentId) {
+          loadGraph({ document_id: selectedDocumentId }); 
+      } else {
+          // If NO document is selected, ONLY load 'all' if we are NOT in embed mode.
+          // This prevents the "load everything" issue in GenUI.
+          if (!embedMode) {
+              loadGraph(null);
+          }
+      }
   };
   
   const toggleEntityFilter = (type: string) => setSelectedEntityFilters(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
@@ -319,9 +364,12 @@ export default function Home() {
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-[#020617] flex flex-col md:flex-row overflow-hidden text-[#F8FAFC]">
-        <div className="hidden md:block bg-[#0F172A] border-r border-[#334155]">
-            <MainSidebar />
-        </div>
+        {!embedMode && (
+           <div className="hidden md:block bg-[#0F172A] border-r border-[#334155]">
+               <MainSidebar />
+           </div>
+        )}
+        
         {isFilterPanelOpen && (
           <div className="hidden md:block border-r border-[#334155] bg-[#0F172A]">
             <FilterPanel
@@ -333,11 +381,17 @@ export default function Home() {
           </div>
         )}
         <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#020617]">
-          {/* Header */}
           <header className="bg-[#0F172A] border-b border-[#334155] shadow-sm z-20 px-6 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <h2 className="text-xl font-semibold text-white">Knowledge Graph POC</h2>
-              <button onClick={handleForceRefresh} className="p-1 hover:bg-[#1E293B] rounded-full transition-colors"><RefreshCw className="w-4 h-4 text-[#94A3B8]" /></button>
+              <h2 className="text-xl font-semibold text-white">
+                {embedMode ? "Knowledge Graph" : "Knowledge Graph POC"}
+              </h2>
+              {embedMode && searchParams.get("domain") && (
+                 <span className="text-xs bg-blue-900/50 text-blue-300 px-2 py-1 rounded border border-blue-800">
+                    Connected: {searchParams.get("domain")} / {searchParams.get("docId")}
+                 </span>
+              )}
+              <button onClick={handleForceRefresh} className="p-1 hover:bg-[#1E293B] rounded-full"><RefreshCw className="w-4 h-4 text-[#94A3B8]" /></button>
               <div className="w-3 h-3 rounded-full bg-[#10B981]" />
             </div>
             <div className="text-sm text-[#94A3B8]">
@@ -347,15 +401,16 @@ export default function Home() {
 
           <div className="flex-1 flex flex-row overflow-hidden">
             <div className="flex-1 flex flex-col min-w-0">
-              {/* Controls Bar */}
               <div className="bg-[#0F172A] border-b border-[#334155] px-4 py-2 flex items-center justify-end gap-3">
-                <div className="flex items-center gap-2 max-w-md w-full">
-                  <select value={selectedDocumentId || ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)} className="flex-1 p-2 border border-[#334155] bg-[#1E293B] text-white rounded-md text-sm">
-                    <option value="">-- Load All / Select File --</option>
-                    {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.filename} ({doc.entityCount} nodes{doc.relationCount ? `, ${doc.relationCount} edges` : ''})</option>)}
-                  </select>
-                  <button onClick={handleDeleteFile} disabled={!selectedDocumentId || isDeleting} className="p-2 text-red-400 bg-[#1E293B] hover:bg-[#334155] rounded-md disabled:opacity-50 border border-[#334155] transition-colors"><Trash2 className="w-4 h-4" /></button>
-                </div>
+                {!embedMode && (
+                   <div className="flex items-center gap-2 max-w-md w-full">
+                     <select value={selectedDocumentId || ""} onChange={(e) => setSelectedDocumentId(e.target.value || null)} className="flex-1 p-2 border border-[#334155] bg-[#1E293B] text-white rounded-md text-sm">
+                       <option value="">-- Load All / Select File --</option>
+                       {documents.map((doc) => <option key={doc.id} value={doc.id}>{doc.filename || doc.documentId} ({doc.entityCount} nodes)</option>)}
+                     </select>
+                     <button onClick={handleDeleteFile} disabled={!selectedDocumentId || isDeleting} className="p-2 text-red-400 bg-[#1E293B] hover:bg-[#334155] rounded-md border border-[#334155]"><Trash2 className="w-4 h-4" /></button>
+                   </div>
+                )}
               </div>
 
               <GraphControls
@@ -368,7 +423,6 @@ export default function Home() {
                 onToggleFilterPanel={() => setIsFilterPanelOpen(true)}
               />
 
-              {/* Visualization Canvas */}
               <div className="flex-1 relative p-0 bg-[#020617]">
                 {isInitialLoad ? (
                   <div className="absolute inset-0 flex items-center justify-center"><p className="text-[#94A3B8]">Loading...</p></div>
@@ -390,7 +444,6 @@ export default function Home() {
               </div>
             </div>
             
-            {/* Right Sidebar */}
             <div className="w-80 lg:w-96 bg-[#0F172A] border-l border-[#334155] flex flex-col z-10">
               <div className="flex border-b border-[#334155] overflow-x-auto">
                 {tabs.map((tab: any) => {
@@ -412,7 +465,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Modals */}
         {showEntityForm && <EntityForm entity={editingEntity || undefined} existingTypes={allEntityTypes} onSubmit={handleEntitySubmit} onCancel={() => setShowEntityForm(false)} />}
         {showRelationshipForm && <RelationshipForm fromEntityId={relationshipFromId} toEntityId={relationshipToId} relationship={editingRelationship || undefined} entities={stableEntities} existingRelationships={stableRelationships} onSubmit={handleRelationshipSubmit} onCancel={() => setShowRelationshipForm(false)} />}
         {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} target={contextMenu.target} onCreateNode={handleCreateNode} onEditNode={() => handleEditNode(contextMenu.nodeId)} onDeleteNode={() => handleDeleteNode(contextMenu.nodeId)} onCreateRelationship={() => handleCreateRelationship(contextMenu.nodeId)} onEditEdge={() => handleEditRelationship(contextMenu.edgeId)} onDeleteEdge={() => handleDeleteRelationship(contextMenu.edgeId)} onClose={() => setContextMenu(null)} />}
