@@ -4,7 +4,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, memo } from "react"
 import cytoscape, { Core } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import type { Entity, Relationship } from "@/types";
-import { normalizeType, getEntityColor } from "@/lib/graphUtils";
+import { normalizeType } from "@/lib/graphUtils";
 
 // Register Layout Extensions
 if (typeof window !== "undefined") {
@@ -46,6 +46,26 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
     const prevEntitiesIds = useRef<string>("");
     const prevRelIds = useRef<string>("");
 
+    // --- COLOR LOGIC (FIXED CRASH HERE) ---
+    const getNodeColor = (type: any) => {
+      // FIX: Force String() conversion to prevent crash if type is a number or object
+      const t = String(type || "concept").toLowerCase();
+      
+      switch (t) {
+        case 'case': return '#f472b6';      // Pink
+        case 'activity': return '#22d3ee';  // Cyan
+        case 'job': return '#fbbf24';       // Amber
+        case 'status': return '#a78bfa';    // Purple
+        case 'time': return '#9ca3af';      // Gray
+        case 'product': return '#34d399';   // Emerald
+        case 'branch': return '#f87171';    // Red
+        case 'amount': return '#818cf8';    // Indigo
+        case 'document': return '#64748b';  // Slate
+        case 'concept': return '#60a5fa';   // Blue (Default)
+        default: return '#60a5fa';
+      }
+    };
+
     // 1. INITIALIZE CYTOSCAPE CONFIGURATION
     useEffect(() => {
       if (!containerRef.current) return;
@@ -61,9 +81,10 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                selector: "node",
                style: {
                  "background-color": (ele: any) => {
-                    // Pass full data to util to catch editable 'normType'
-                    const normType = normalizeType(ele.data());
-                    return getEntityColor(normType);
+                    const data = ele.data();
+                    // Priority: Explicit normType > type > label fallback
+                    const type = data.normType || data.type || "Concept";
+                    return getNodeColor(type);
                  },
                  "label": "data(label)",
                  "shape": "round-rectangle",
@@ -74,7 +95,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                  "text-wrap": "wrap",
                  "text-max-width": "140px", 
                  "font-size": "11px",        
-                 "font-weight": "bold",     
+                 "font-weight": "bold",      
                  "color": "#ffffff",
                  "text-outline-width": 2,  
                  "text-outline-color": "#1e293b", 
@@ -106,13 +127,13 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
              { 
                selector: ".hidden", 
                style: { 
-                   "display": "none" // Completely hides filtered items
+                   "display": "none"
                } 
              },
              { 
                selector: ".faded", 
                style: { 
-                   "opacity": 0.1,  // Faint for non-focused items
+                   "opacity": 0.1, 
                    "z-index": 0 
                } 
              },
@@ -121,7 +142,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                style: { 
                  "border-width": 4, 
                  "border-color": "#FBBF24", // Gold Border
-                 "z-index": 999             // Bring to front
+                 "z-index": 999             
                } 
              },
              {
@@ -138,7 +159,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
                selector: ":selected",
                style: {
                  "border-width": 4,
-                 "border-color": "#3b82f6", // Blue border for selection
+                 "border-color": "#3b82f6", 
                }
              }
         ],
@@ -242,7 +263,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
             animate: true, 
             animationDuration: 800,
             nodeRepulsion: 18000, 
-            idealEdgeLength: 180,   
+            idealEdgeLength: 180,    
             nodeSeparation: 120,    
             gravity: 0.25,
             numIter: 2500,
@@ -251,21 +272,20 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
 
     }, [entities, relationships]);
 
-    // 3. EXPOSE API (FILTER LOGIC REFINED)
+    // 3. EXPOSE API
     useImperativeHandle(ref, () => ({
       filterByType: (visibleTypes) => {
         if (!cyRef.current) return;
         cyRef.current.batch(() => {
             cyRef.current?.nodes().removeClass("hidden");
             
-            // If the filter list is NOT empty, we hide things that are NOT in the list.
             if (visibleTypes && visibleTypes.length > 0) {
               const lowerVisible = visibleTypes.map(t => t.toLowerCase());
               
               cyRef.current?.nodes().filter(n => {
-                  // Normalize node type using util, then lowercase
-                  const nType = normalizeType(n.data()).toLowerCase();
-                  // Hide if NOT in the visible list
+                  const data = n.data();
+                  // Use same logic as color to determine type
+                  const nType = String(data.normType || data.type || "concept").toLowerCase();
                   return !lowerVisible.includes(nType);
               }).addClass("hidden");
             }
@@ -295,7 +315,7 @@ const GraphVisualization = memo(forwardRef<GraphVisualizationRef, GraphVisualiza
         cy.batch(() => {
             cy.elements().removeClass("hidden faded highlighted");
             if (!term) return;
-            const matches = cy.nodes().filter(n => n.data('label').toLowerCase().includes(term));
+            const matches = cy.nodes().filter(n => String(n.data('label')).toLowerCase().includes(term));
             const neighborhood = matches.neighborhood().add(matches);
             cy.elements().not(neighborhood).addClass("faded"); 
             matches.addClass("highlighted");
