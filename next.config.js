@@ -14,7 +14,7 @@ const nextConfig = {
           {
             key: 'Content-Security-Policy',
             value: 
-              "frame-ancestors http://localhost:8080 https://genui.irmai.io;",
+              "frame-ancestors http://localhost:8080 https://genui.irmai.io https://demo-genui.irmai.io;",
           },
         ],
       },
