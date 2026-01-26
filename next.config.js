@@ -5,6 +5,22 @@ const nextConfig = {
   output: 'standalone',
   // Mark packages that should not be bundled for server components
   serverComponentsExternalPackages: ['surrealdb.js'],
+
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            value: 
+              "frame-ancestors http://localhost:8080 https://genui.irmai.io;",
+          },
+        ],
+      },
+    ];
+  },
+
   webpack: (config, { isServer }) => {
     // Only allow Node.js modules on the server side
     if (!isServer) {
