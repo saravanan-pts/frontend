@@ -31,9 +31,10 @@ const getId = (item: any): string => {
   return String(item);
 };
 
-const normalize = (str: string) => {
+// Robust normalizer for strict matching
+const normalize = (str: any) => {
     if (!str) return "";
-    return String(str).toLowerCase().replace(/[^a-z0-9]/g, ""); 
+    return String(str).toLowerCase().replace(/[\s\-_]/g, ""); 
 };
 
 function HomeContent() {
@@ -46,17 +47,18 @@ function HomeContent() {
   // 2. USE API HOOK
   const { loadGraph, searchGraph, analyzeGraph, createEntity, updateEntity, deleteEntity, createRelationship, deleteRelationship } = useGraph();
 
+  // 3. STATE MANAGEMENT
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [selectedSelection, setSelectedSelection] = useState<string>(""); 
   const [documents, setDocuments] = useState<any[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
   
-  // --- INTEGRATION STATE ---
+  // Integration State
   const embedMode = searchParams.get("mode") === "embed";
   
   // Right Panel: Open by default ONLY if NOT in embed mode
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(!embedMode); 
-  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false); // Default filter closed
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
   
   // View State
   const [viewEntities, setViewEntities] = useState<Entity[]>([]);
@@ -112,7 +114,6 @@ function HomeContent() {
       const res = await fetch(`${API_URL}/api/documents`); 
       if (res.ok) { 
         const data = await res.json();
-        // Handle different API response shapes (array vs object)
         const docsList = data.files || (Array.isArray(data) ? data : []);
         setDocuments(docsList);
         return docsList; 
@@ -131,19 +132,42 @@ function HomeContent() {
       else await loadGraph({ document_id: value });
   };
 
-  // --- INITIALIZATION ---
+  // --- INITIALIZATION (STRICT MATCHING) ---
   useEffect(() => {
     const initIntegration = async () => {
         const docs = await fetchDocuments();
+        
+        // Check URL Params (from GenUI)
+        const globalDomain = searchParams.get("domain");
         const globalDocId = searchParams.get("docId");
         
-        if (globalDocId && docs.length > 0) {
-            const match = docs.find((d: any) => 
-                normalize(d.filename || d.documentId).includes(normalize(globalDocId))
-            );
-            if (match) setSelectedSelection(match.id);
+        if (globalDocId) {
+            // STRICT LOGIC: Must match to load
+            const targetDocNorm = normalize(globalDocId);
+            const targetDomainNorm = normalize(globalDomain);
+
+            const match = docs.find((d: any) => {
+                const fName = normalize(d.filename || d.documentId);
+                const docMatches = fName.includes(targetDocNorm);
+                
+                // If domain exists, check it too
+                if (targetDomainNorm) {
+                    return docMatches && (fName.includes(targetDomainNorm) || (d.domain && normalize(d.domain).includes(targetDomainNorm)));
+                }
+                return docMatches;
+            });
+
+            if (match) {
+                console.log(`Auto-selecting matched file: ${match.filename}`);
+                setSelectedSelection(match.id);
+                // Trigger load immediately for the match
+                await loadGraph({ document_id: match.id });
+            } else {
+                console.warn(`STRICT MODE: No matching file found for DocID: ${globalDocId}. Waiting...`);
+                // DO NOT LOAD GRAPH if no match in embed mode
+            }
         } else {
-             // If normal user, load entire graph on start
+             // If normal user (no params), load entire graph on start
              if (isInitialLoad && !embedMode) await loadGraph(null);
         }
         setIsInitialLoad(false);
@@ -151,24 +175,15 @@ function HomeContent() {
     initIntegration();
   }, [fetchDocuments, searchParams, loadGraph, embedMode]); 
   
-  // Reload graph when selection changes
-  useEffect(() => { 
-      if (!isInitialLoad && selectedSelection) {
-          loadGraph({ document_id: selectedSelection }).catch(console.error); 
-      }
-  }, [selectedSelection, loadGraph, isInitialLoad]);
-
   // --- VIEW LIMITER (Performance) ---
   useEffect(() => {
     if (stableEntities.length === 0) {
       setViewEntities([]); setViewRelationships([]);
       return;
     }
-    // Debounce view updates to prevent UI freezing
     const timer = setTimeout(() => {
         const nodesToShow = stableEntities.slice(0, 1500); // Cap at 1500 nodes
         
-        // Ensure selected entity is always visible
         if (selectedEntity && !nodesToShow.find(n => getId(n) === getId(selectedEntity))) {
             const found = stableEntities.find(n => getId(n) === getId(selectedEntity));
             if (found) nodesToShow.push(found);
@@ -264,7 +279,24 @@ function HomeContent() {
         {/* MAIN CANVAS AREA */}
         <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#020617]">
           
-          {/* HEADER: Hidden in Embed Mode */}
+          {/* --- FIX: SPECIAL HEADER FOR EMBED MODE --- */}
+          {embedMode && (
+            <div className="bg-[#0F172A] border-b border-[#334155] px-4 py-2 flex items-center justify-between z-20">
+                <div className="flex items-center gap-3">
+                    <div className="w-2 h-2 rounded-full bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                    <span className="text-sm text-slate-400">
+                        Context: <span className="text-blue-400 font-medium">{searchParams.get("domain") || "General"}</span> 
+                        <span className="mx-2 text-slate-600">/</span>
+                        <span className="text-white font-medium">{searchParams.get("docId") || "Waiting for selection..."}</span>
+                    </span>
+                </div>
+                <div className="text-xs text-[#94A3B8]">
+                    {viewEntities.length} nodes
+                </div>
+            </div>
+          )}
+
+          {/* STANDARD HEADER: Hidden in Embed Mode */}
           {!embedMode && (
             <header className="bg-[#0F172A] border-b border-[#334155] shadow-sm z-20 px-6 py-4 flex items-center justify-between">
                 <div className="flex items-center gap-3">
